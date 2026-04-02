@@ -14,7 +14,7 @@
 | IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
 | Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
 | Branch | `feat/oos` |
-| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling) |
+| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace) |
 
 ### Core Terminology
 
@@ -147,13 +147,27 @@ Each chunk record:
 
 Reverse insertion reason: when inserting earlier chunks, the next chunk's OID must already be known.
 
-### Best Page Policy (M1)
+### Best Page Policy (3-Tier Bestspace — M2, CBRD-26658)
 
-Current simple approach: remember one "last insert page" per VFID. Reuse if space available, otherwise allocate new page.
+Mirrors the heap file's proven 15+ year bestspace architecture. OOS file page 0 holds `OOS_HDR_STATS` (best[10] hints, space estimates, persisted to disk as non-logged hints). A separate global cache (`OOS_BESTSPACE_CACHE`) uses dual hash tables (VFID→entry, VPID→entry) with its own mutex, fully independent from heap's `bestspace_mutex`.
 
-- **Pro**: Simple, fast
-- **Con**: Hotspot on single page, wasted space on other pages
-- **Future**: Global bestspace array, size-based classification, locality optimization (M2+)
+```
+oos_find_best_page()
+│
+├─ [1] Fix header page (WRITE latch), load OOS_HDR_STATS best[] hints
+├─ [2] oos_stats_find_page_in_bestspace()
+│   ├── Tier 1: Global hash cache lookup (VFID key)
+│   ├── Tier 2: best[10] circular array scan
+│   └── Tier 3: Candidate page fix (CONDITIONAL_LATCH, zero-wait)
+├─ [3] If not found → oos_stats_sync_bestspace()
+│   └── Scan OOS file pages (max 20%, 100 page limit)
+│       → Recharge best[] and global cache → retry
+└─ [4] Still not found → oos_file_alloc_new()
+```
+
+- **Delete/rollback**: `oos_rv_redo_delete()` calls `oos_stats_del_bestspace_by_vpid()` to evict stale cache entries
+- **Crash recovery**: Sync scanner auto-rediscovers free space (self-healing, since hints are non-logged)
+- **Concurrency**: Zero-wait conditional latch avoids deadlocks during multi-transaction INSERT
 
 ---
 
@@ -292,7 +306,7 @@ These invariants MUST hold — test scenarios verify each one:
 | Limitation | Impact | Future Fix |
 |---|---|---|
 | No `oos_file_destroy` | OOS files grow indefinitely | M2 |
-| Bestspace = last-insert-page only | Hotspot on single page, wasted space | M2 (global bestspace) |
+| ~~Bestspace = last-insert-page only~~ | ~~Hotspot on single page, wasted space~~ | **DONE** (CBRD-26658: 3-tier bestspace) |
 | DELETE doesn't clean OOS | Orphan records until vacuum | M2 (vacuum integration) |
 | No OOS OID reuse on update | Extra I/O when value unchanged | M3 (deduplication) |
 | Ordered fix deadlock risk | Two tx's accessing OOS pages in different order | M4 |
