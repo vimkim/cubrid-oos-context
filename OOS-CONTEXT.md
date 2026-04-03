@@ -9,7 +9,7 @@
 |---------|--------|
 | OOS trigger | record > `DB_PAGESIZE/8` (2KB on 16KB pages) AND column > 512B |
 | OOS file type | `FILE_OOS`, one per heap file (1:1 mapping) |
-| OOS pointer | 8-byte OOS OID (volid 2B + pageid 4B + slotid 2B) in variable area |
+| OOS pointer | 16-byte OOS OID (volid 2B + pageid 4B + slotid 2B + full_length 8B) in variable area |
 | HAS_OOS flag | MVCC header bit 3 (`OR_MVCC_FLAG_HAS_OOS = 0x08`) |
 | IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
 | Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
@@ -23,7 +23,7 @@
 | OOS Record | Column data split from heap record, stored in OOS file |
 | OOS File | FILE_OOS type file, 1:1 with heap file (one per table) |
 | OOS Page | Slotted page within OOS file (size = DB_PAGESIZE) |
-| OOS OID | 8-byte pointer (volid, pageid, slotid) stored in heap record's variable area |
+| OOS OID | 16-byte pointer (volid 2B, pageid 4B, slotid 2B, full_length 8B) stored in heap record's variable area |
 | HAS_OOS flag | Record-level MVCC header flag — true if any column is OOS |
 | IS_OOS flag | Per-column flag in variable offset table entry |
 | OOS Resolve | Replacing OOS OIDs with actual values (expands record size) |
@@ -39,7 +39,7 @@ AS-IS:
 [ id | name | big_text (1.7KB) | big_blob (2KB) ]  <- entire heap record
 
 TO-BE:
-[ id | name | OOS OID (8B) | OOS OID (8B) ]        <- compact heap record
+[ id | name | OOS OID (16B) | OOS OID (16B) ]       <- compact heap record
                   |                |
                   v                v
            [ big_text ]     [ big_blob ]             <- OOS file (separate)
@@ -75,7 +75,7 @@ Example with DB_PAGESIZE=16K (threshold = 2KB):
 |---|---|---|---|
 | **Trigger** | ~2KB (row) | ~8KB (row) | record > PAGESIZE/8 + column > 512B |
 | **Separation** | Column-level | Column-level | Column-level |
-| **Pointer size** | 18B | 20B | **8B** (OOS OID) |
+| **Pointer size** | 18B | 20B | **16B** (OOS OID) |
 | **Compression** | pglz / lz4 | COMPRESSED format | None (M1) |
 | **Storage** | TOAST table | Overflow pages | OOS file (FILE_OOS) |
 | **Chunk split** | ~2KB chunks | Page-unit chain | OOS page-unit chain |
@@ -102,13 +102,13 @@ OOS is an evolution of CUBRID's existing Overflow Page mechanism:
 Heap Record (on disk):
 +------------------+------------------+-------+--------------------------------+
 |  MVCC Header     |  Variable Offset |  Fixed|  Variable Area                 |
-|  (flags+txn ids) |  Table (VOT)     |  Cols |  (values or 8-byte OOS OIDs)   |
+|  (flags+txn ids) |  Table (VOT)     |  Cols |  (values or 16-byte OOS OIDs)  |
 +------------------+------------------+-------+--------------------------------+
 
 VOT Entry (per variable column):
   [offset_value (30 bits) | RESERVED (1 bit) | IS_OOS (1 bit)]
 
-  IS_OOS = 1  ->  variable area contains OOS OID (8 bytes) at this offset
+  IS_OOS = 1  ->  variable area contains OOS OID (16 bytes) at this offset
   IS_OOS = 0  ->  variable area contains actual value at this offset
 
 MVCC Header Flags (5 bits total):
@@ -188,7 +188,7 @@ heap_insert()
   |   +-> oos_insert() -> returns OOS OID
   |
   +-> Build heap record:
-      +-> variable area: OOS OID (8B) + IS_OOS flag in VOT
+      +-> variable area: OOS OID (16B) + IS_OOS flag in VOT
       +-> MVCC header: set HAS_OOS flag
       +-> spage_insert() into heap page
 
