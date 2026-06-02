@@ -1,7 +1,7 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — AI Agent Context
 
 > Single source of truth for AI agents working on CUBRID OOS implementation and debugging.
-> Last updated: 2026-04-03 | Branch: `feat/oos` | Milestone: M2 in progress
+> Last updated: 2026-06-02 | Branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
 
 ## Quick Reference
 
@@ -243,7 +243,7 @@ Step 3: Old OOS record stays alive
 
 **Key invariant**: One OOS OID is referenced by exactly one record (heap page or undo log). OOS OIDs are NOT shared between records.
 
-**M1 limitation**: Always creates new OOS OID even if value unchanged. OOS OID reuse planned for M3.
+**Current limitation**: Always creates a new OOS OID even if the value is unchanged. OOS OID reuse (deduplication) is **deferred to a future improvement** — it is NOT in M2 scope (M3, which had planned it, is cancelled). Verified against code: UPDATE always allocates fresh OIDs (`heap_attrinfo_insert_to_oos`), which the vacuum forward-walk relies on for old/new OID disjointness.
 
 ### DELETE
 
@@ -270,7 +270,7 @@ heap_delete()
 These invariants MUST hold — test scenarios verify each one:
 
 1. **WAL completeness**: Every OOS insert/delete is logged. After crash + recovery, OOS state matches the last committed transaction state.
-2. **Undo correctness**: Update undo log contains fully-resolved OOS values (no OOS OIDs in undo records). Rollback restores actual previous column values.
+2. **Undo correctness**: Update/delete undo retains the previous record **as-is, including its OOS OIDs** — undo does NOT store resolved values (that would bloat the undo log and defeat the whole point of OOS). Rollback restores the previous record, whose OOS OIDs still point to live OOS records; MVCC snapshot reads reconstruct the old version the same way (via `prev_version_lsa` → undo recdes → `oos_read`), which is exactly why old OOS records must survive until vacuum (see invariant 3). The vacuum forward-walk depends on this — it extracts OOS OIDs straight out of the undo recdes. _(Corrected 2026-06-02: the prior text claimed undo holds fully-resolved values with no OIDs, which contradicts invariant 3 and the code; it had misled a fix proposal toward deleting old OOS inline.)_
 3. **No orphan OOS records after update**: On update, old OOS records remain for MVCC. When vacuum removes old heap record, `oos_delete()` cleans up old OOS records.
 4. **Delete safety**: Deleted records retain OOS OIDs in heap. OOS records NOT deleted at delete time — they remain accessible until vacuum.
 5. **Replication log completeness**: Replication log contains enough info to replay OOS operations on replica. OOS OIDs in replication log point to correct OOS pages on replica.
@@ -308,15 +308,15 @@ These invariants MUST hold — test scenarios verify each one:
 | No `oos_file_destroy` | OOS files grow indefinitely | M2 |
 | ~~Bestspace = last-insert-page only~~ | ~~Hotspot on single page, wasted space~~ | **DONE** (CBRD-26658: 3-tier bestspace) |
 | DELETE doesn't clean OOS | Orphan records until vacuum | M2 (vacuum integration) |
-| No OOS OID reuse on update | Extra I/O when value unchanged | M3 (deduplication) |
-| Ordered fix deadlock risk | Two tx's accessing OOS pages in different order | M4 |
+| No OOS OID reuse on update | Extra I/O when value unchanged | Future improvement (deduplication; M3 cancelled, not in M2) |
+| Ordered fix deadlock risk | Two tx's accessing OOS pages in different order | Future improvement (M4 cancelled, not in M2) |
 | No PEEK mode for OOS reads | Always COPY semantics, extra memcpy | Future |
 | No across-page compaction | Fragmentation over time | Future |
 | `S_DOESNT_FIT` handling incomplete | Caller must handle buffer overflow | Upper-layer |
 
 ### Optimization Ideas
 
-**A. Update OOS OID reuse (CBRD-26516)**: In `heap_attrinfo_set_uninitialized`, prevent reading OOS values via `heap_attrvalue_read` for unchanged columns. Reuse existing OOS OID instead of creating new one.
+**A. Update OOS OID reuse (CBRD-26516)** _(future improvement — was the cancelled M3 plan; not in M2)_: In `heap_attrinfo_set_uninitialized`, prevent reading OOS values via `heap_attrvalue_read` for unchanged columns. Reuse existing OOS OID instead of creating new one. **Prerequisite:** the vacuum forward-walk (`vacuum_forward_walk_delete_old_oos`) must first gain an old∩new OID sharing check, or it will delete an OID the live post-image still references.
 
 **B. Defer `oos_insert` to `attrinfo_force` (Heesoo's idea)**: Unify `insert -> oos_log_insert -> oos_repl_log_insert` flow timing to `attrinfo_force`. This enables generating OOS replication log at the same time as heap record replication log, allowing PK inclusion in OOS replication log. Implementation: separate `oos_repl_log` function (existing repl log function overwrites LSA in sequence: `tail_lsa -> repl_insert_lsa -> repl_rec->lsa`, so OOS LSAs must be collected separately).
 
@@ -442,9 +442,9 @@ SELECT (vc1 = CAST(REPEAT('AA', 1700) AS BIT VARYING)) FROM t WHERE id = 1;
 ## Milestones
 
 - **M1** (Feb 2026, DONE): Basic POC — insert/read/update/delete, WAL, recovery, replication
-- **M2** (3/10-4/17, IN PROGRESS): Drop table, bestspace optimization, in-page compaction, vacuum integration
-- **M3** (4/20-5/29, PLANNED): OOS OID reuse on update (deduplication)
-- **M4** (TBD): Ordered fix deadlock handling, monitoring tools
+- **M2** (active — umbrella for all remaining OOS work): Drop table, bestspace optimization, in-page compaction, vacuum integration
+- ~~**M3** (was: OOS OID reuse on update / deduplication)~~ — **CANCELLED (2026-06-02).** OID reuse is deferred to a future improvement; it is NOT folded into M2 (current code always allocates a fresh OID — verified via `heap_attrinfo_insert_to_oos`). See **Limitations** and **Optimization Ideas → A**.
+- ~~**M4** (TBD): Ordered fix deadlock handling, monitoring tools~~ — **CANCELLED (2026-06-02).** Deferred to future improvements; not in M2. (Ordered-fix deadlock prevention is also tracked under Limitations and Optimization Ideas → E.)
 
 ---
 
