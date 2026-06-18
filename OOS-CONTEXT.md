@@ -203,6 +203,7 @@ oos_find_best_page()
 - **Delete/rollback**: `oos_rv_redo_delete()` calls `oos_stats_del_bestspace_by_vpid()` to evict stale cache entries
 - **Crash recovery**: Sync scanner auto-rediscovers free space (self-healing, since hints are non-logged)
 - **Concurrency**: Zero-wait conditional latch avoids deadlocks during multi-transaction INSERT
+- **Known flaw (unfiled, confirmed in code)**: the fit-check over-reserves by one slot. `oos_find_best_page` builds `total_space = rec_length + sizeof(SPAGE_SLOT)` (`oos_file.cpp:1489`) and compares it against stored `spage_max_space_for_new_record` values — but that function *already* deducts a slot when one must be carved (`slotted_page.c:999`). Heap compares against the raw record length with no slot added (`heap_file.c:21803`). Net: pages with room for `rec_length + 1 slot` are wrongly rejected → spurious new-page allocation / OOS file growth (observed ~6→26 pages over delete/reinsert cycles). Fix: drop the `+ sizeof(SPAGE_SLOT)` to match heap's contract.
 
 > **Planned change (ADR-0001, CBRD-26831):** Tier-3 sync currently enumerates pages with `file_numerable_find_nth` because the OOS file is created `is_numerable=true`. This is the only *always-permanent + numerable* file in CUBRID, and once per-page vacuum dealloc is wired it enters an unvalidated mark-delete-churn regime. The plan is to make `FILE_OOS` **non-numerable** and enumerate via a **sector-bitmap walk** (`file_get_all_data_sectors`). That walk reads a frozen bitmap snapshot, so sampled pages must be fixed with `OLD_PAGE_MAYBE_DEALLOCATED` (read-only hint path only; the insert path keeps plain `OLD_PAGE`). Do it *before* `oos_remove_page` gets vacuum callers. See `docs/adr/0001-oos-page-enumeration-non-numerable.md`.
 
@@ -245,7 +246,9 @@ heap_get() / scan
   |   +-> 0: return as-is (no OOS)
   |   +-> 1: proceed to resolve
   |
-  +-> heap_record_replace_oos_oids_with_values_if_exists()
+  +-> heap_record_replace_oos_oids()   (record-level Expand; opt-in via
+  |   HEAP_GET_CONTEXT.expand_oos since CBRD-26729 — see §3 Census. Most
+  |   fetches DON'T set it and instead let the attribute layer Resolve per column)
       +-> Iterate VOT: for each IS_OOS column
           +-> oos_read() -> fetch actual value from OOS file
       +-> Reconstruct full record (size expands significantly)
@@ -272,7 +275,9 @@ attribute layer Resolves per column and the cheap fetch is correct AND faster.**
 `catcls_update_instance`, `catcls_update_class_stats`); the other ~17 were mechanically migrated and
 should revert to the cheap fetch. **Mirror hazard:** raw-byte paths that *forgot* to Expand leak
 unresolved OOS OIDs — known instance `xlocator_fetch_all` → unloaddb/compactdb (`load_object.c` is
-OOS-blind; tracked under CBRD-26583 / PR 7093).
+OOS-blind). Ticket of record: **CBRD-26948 (OPEN)** — making Expand opt-in in PR #7093 (CBRD-26729)
+left `xlocator_fetch_all` no longer expanding, re-leaking OIDs to unloaddb/compactdb. (Was loosely
+attributed to CBRD-26583 / PR 7093.)
 
 ### UPDATE (Always New OID — M1)
 
@@ -365,7 +370,7 @@ DELETE/UPDATE never clean OOS inline; vacuum reclaims OOS records when it reclai
 | **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — `oos_record_header` has no owner OID / generation. Found in PR #6986 review | **CRITICAL — silent data loss.** Fix (owner/generation field in chunk header) TBD/ANALYSIS | CBRD-26950 |
 | **TDE not applied to OOS pages** | `xfile_apply_tde_to_class_files` walks heap/heap-ovf/btree/btree-ovf but skips `FILE_OOS`; OOS lazy-create (`heap_oos_find_vfid` docreate path) also omits `file_apply_tde_algorithm`. `encrypt`-table variable columns past the OOS threshold land **plaintext** on disk (`grep -a` extracts them). Pre-OOS, the same data went through heap-overflow, which *did* encrypt | **CRITICAL — security/compliance regression** (TDE disk-theft model broken). Fix: add OOS branch to walker + inline TDE in lazy-create (A+B defense-in-depth) | CBRD-26830 |
 | unloaddb 1.6-1.7x slower | `heap_attrinfo_start` called per `heap_next` in `feat/oos` branch | Performance regression | CBRD-26458 |
-| UPDATE calls `oos_read` 3x redundantly | `heap_record_replace_oos_oids_with_values_if_exists()` added to `locator_fetch()` but should only be in `locator_fetch_all()` (unloaddb) | Extra I/O | CBRD-26516 |
+| ~~UPDATE calls `oos_read` 3x redundantly~~ | Record-level Expand redundancy removed: `heap_record_replace_oos_oids` is now opt-in via `HEAP_GET_CONTEXT.expand_oos`, so non-raw-byte fetches use the cheap attribute-layer Resolve. Residual "UPDATE re-reads unchanged OOS columns" is M1 design (no OID reuse), not a bug — confirmed by CBRD-26953 | **DONE** (CBRD-26729 in `feat/oos`) | CBRD-26516 |
 | CDC flashback OOS OID resolve | CDC flashback needs to replace OOS OIDs with actual values in recdes | Missing feature | — |
 | Unnecessary OOS replication log in `locator_add_or_remove_index` | OOS replication log forced in unrelated context | Refactoring needed | — |
 | RECDES length 4-byte limit | OOS recdes max size limited to 2GB (4-byte length). May need 8-byte extension for 16EB max | Design limitation | — |
