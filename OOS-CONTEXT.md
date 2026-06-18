@@ -15,7 +15,7 @@
 | IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
 | Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
 | Branch | `feat/oos` |
-| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26776 (largest-first demotion, done), CBRD-26937 (OOS+bigone rejection), CBRD-26912 (STORAGE PREFER_INLINE, proposed) |
+| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26668 (vacuum integration, done), CBRD-26776 (largest-first demotion, done), CBRD-26937 (OOS+bigone rejection), CBRD-26950 (vacuum slot-reuse data loss — CRITICAL), CBRD-26830 (TDE plaintext leak — security), CBRD-26912 (STORAGE PREFER_INLINE, proposed) |
 
 ### Core Terminology
 
@@ -111,7 +111,7 @@ if (has_oos && heap_is_big_length (expected_size))   // expected_size = record s
 | **Stop semantics** | Largest-first, stop when row fits | Largest-first | **Largest-first, stop when record fits (CBRD-26776)** |
 | **Separation** | Column-level | Column-level | Column-level |
 | **Pointer size** | 18B | 20B | **16B** (OOS OID) |
-| **Compression** | pglz / lz4 | COMPRESSED format | None (M1) |
+| **Compression** | pglz / lz4 | COMPRESSED format | None — deferred to future; CTO leans type-layer (`mr_data_writeval`), not OOS-layer (see Design Discussions) |
 | **Storage** | TOAST table | Overflow pages | OOS file (FILE_OOS) |
 | **Chunk split** | ~2KB chunks | Page-unit chain | OOS page-unit chain |
 | **UPDATE reuse** | Unchanged columns keep pointer | Unchanged columns keep pointer | Always new OID (M1) |
@@ -343,11 +343,16 @@ These invariants MUST hold — test scenarios verify each one:
 - **Slave OOS OIDs may differ from master** — only value equality is guaranteed, not OID equality.
 - Replication log must carry sufficient data for slave to perform its own `oos_insert` operations.
 
-### Vacuum + OOS
+### Vacuum + OOS (IMPLEMENTED — CBRD-26668, PR #6986 merged)
 
-- DELETE does not clean OOS. Vacuum handles cleanup when reclaiming dead heap records.
-- Two possible approaches (to be decided): synchronous `oos_delete` during `vacuum_heap`, or dedicated OOS vacuum job.
-- If vacuum crashes mid-OOS-delete: WAL redo completes the delete on recovery. If not yet logged: vacuum retries.
+DELETE/UPDATE never clean OOS inline; vacuum reclaims OOS records when it reclaims the dead heap versions that referenced them. Three cleanup paths (`vacuum_oos.cpp`, `heap_oos.cpp`):
+
+1. **Forward-walk (MVCC old versions)** — `vacuum_forward_walk_oos_delete_atomic` (`vacuum_oos.cpp:154`): pulls old OOS OIDs straight out of the UPDATE/DELETE undo recdes (relies on invariant 2) and `oos_delete`s them. Runs in *its own* sysop with no enclosing sysop, so a mid-walk failure rolls back only its own deletes.
+2. **Within-sysop (current record)** — `vacuum_heap_oos_delete_within_sysop` (`vacuum_oos.cpp:383`): deletes OOS records referenced by a heap record being vacuumed, inside the caller's sysop.
+3. **Eager (non-MVCC / SA_MODE)** — `heap_oos_delete_unreferenced` (`heap_oos.cpp:425`): single-process mode has no vacuum, so old OOS is deleted synchronously at UPDATE time, comparing old vs new OIDs to keep any the post-image still references.
+
+- **Record vs page**: vacuum deletes OOS *records* (slots), but does **not** yet deallocate emptied OOS *pages* — `oos_remove_page` (`oos_file.cpp:1008`) has no vacuum caller; empty-page reclaim is CBRD-26786 (proposed). This is exactly why ADR-0001's non-numerable migration window is still open (no live page-dealloc path to preserve).
+- **Crash mid-delete**: each chunk delete is logged within a sysop, so recovery redo/undo keeps OOS state atomic with the heap reclamation.
 
 ---
 
@@ -357,6 +362,8 @@ These invariants MUST hold — test scenarios verify each one:
 
 | Issue | Description | Impact | JIRA |
 |---|---|---|---|
+| **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — `oos_record_header` has no owner OID / generation. Found in PR #6986 review | **CRITICAL — silent data loss.** Fix (owner/generation field in chunk header) TBD/ANALYSIS | CBRD-26950 |
+| **TDE not applied to OOS pages** | `xfile_apply_tde_to_class_files` walks heap/heap-ovf/btree/btree-ovf but skips `FILE_OOS`; OOS lazy-create (`heap_oos_find_vfid` docreate path) also omits `file_apply_tde_algorithm`. `encrypt`-table variable columns past the OOS threshold land **plaintext** on disk (`grep -a` extracts them). Pre-OOS, the same data went through heap-overflow, which *did* encrypt | **CRITICAL — security/compliance regression** (TDE disk-theft model broken). Fix: add OOS branch to walker + inline TDE in lazy-create (A+B defense-in-depth) | CBRD-26830 |
 | unloaddb 1.6-1.7x slower | `heap_attrinfo_start` called per `heap_next` in `feat/oos` branch | Performance regression | CBRD-26458 |
 | UPDATE calls `oos_read` 3x redundantly | `heap_record_replace_oos_oids_with_values_if_exists()` added to `locator_fetch()` but should only be in `locator_fetch_all()` (unloaddb) | Extra I/O | CBRD-26516 |
 | CDC flashback OOS OID resolve | CDC flashback needs to replace OOS OIDs with actual values in recdes | Missing feature | — |
@@ -380,7 +387,7 @@ These invariants MUST hold — test scenarios verify each one:
 
 ### Optimization Ideas
 
-**A. Update OOS OID reuse (CBRD-26516)** _(future improvement — was the cancelled M3 plan; not in M2)_: In `heap_attrinfo_set_uninitialized`, prevent reading OOS values via `heap_attrvalue_read` for unchanged columns. Reuse existing OOS OID instead of creating new one. **Prerequisite:** the vacuum forward-walk (`vacuum_forward_walk_delete_old_oos`) must first gain an old∩new OID sharing check, or it will delete an OID the live post-image still references.
+**A. Update OOS OID reuse (CBRD-26516)** _(future improvement — was the cancelled M3 plan; not in M2)_: In `heap_attrinfo_set_uninitialized`, prevent reading OOS values via `heap_attrvalue_read` for unchanged columns. Reuse existing OOS OID instead of creating new one. **Prerequisite:** the vacuum forward-walk (`vacuum_forward_walk_oos_delete_atomic`) must first gain an old∩new OID sharing check, or it will delete an OID the live post-image still references.
 
 **B. Defer `oos_insert` to `attrinfo_force` (Heesoo's idea)**: Unify `insert -> oos_log_insert -> oos_repl_log_insert` flow timing to `attrinfo_force`. This enables generating OOS replication log at the same time as heap record replication log, allowing PK inclusion in OOS replication log. Implementation: separate `oos_repl_log` function (existing repl log function overwrites LSA in sequence: `tail_lsa -> repl_insert_lsa -> repl_rec->lsa`, so OOS LSAs must be collected separately).
 
@@ -395,6 +402,7 @@ These invariants MUST hold — test scenarios verify each one:
 - **Multi-column OOS storage**: Combine multiple OOS columns into one record vs. current per-column storage. Direction TBD.
 - **OOS page latch contention**: Yechan's proposal — partition page into 4-64 sections with atomic latches. Deferred unless latch bottleneck becomes severe.
 - **OVF + OOS simultaneous**: A record carrying OOS OIDs that would *also* become `REC_BIGONE` (recdes > ~16K overflow) is now **rejected** at write time with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (CBRD-26937), not silently built. Test the *rejection* (e.g. large fixed `BIT(n)`/`CHAR` + OOS varchar that stays > ~16KB after demotion) rather than coexistence.
+- **OOS value compression (DEFERRED to future — not M2, not built)**: Investigation (CBRD-26756) initially landed on a 2026-05-08 meeting lean toward compressing at the **common OOS-entry point** (PG TOAST `EXTENDED`-style: try compress → if still big, store OOS), covering every variable type going to OOS — today only `VARCHAR` is LZ4-compressed (at the type/OR layer, ≥255B); `VARNCHAR`/`VARBIT`/`JSON`/`SET`/`MULTISET`/`SEQUENCE` are not compressed anywhere. CBRD-26881 then reframed the real fork as **type-serialization layer (`mr_data_writeval`)** vs **OOS boundary**, deferring the choice to ANALYSIS. **Current direction (CTO): defer compression to a future milestone and, when done, control it at the data-type serialization layer (`mr_data_writeval`), NOT the OOS layer** — this supersedes the earlier OOS-entry lean in CBRD-26756. Zero compression code exists in `oos_file.cpp`/`heap_oos.cpp` today. (Beware: the two tickets label their options "A"/"B" in *opposite* directions — describe by layer location, not letter.)
 - **CHAR type as OOS candidate**: Evaluate storing CHAR columns as OOS when they exceed threshold.
 - **Per-column inline preference (CBRD-26912, proposed — NOT yet merged)**: `STORAGE PREFER_INLINE` column option (à la PG `SET STORAGE MAIN`) that pushes a hot column to the *back* of the largest-first demote order, so it's externalized only as a last resort. Soft only — the column still demotes if nothing else fits, preserving the "record always fits a page" invariant. Stored as a new `SM_ATTFLAG_OOS_PREFER_INLINE` bit; the sole policy change is adding it as the primary sort key in `heap_attrinfo_determine_disk_layout`.
 
@@ -404,7 +412,7 @@ These invariants MUST hold — test scenarios verify each one:
 
 ### Testing Principles
 
-- **Use `BIT VARYING` (VARBIT)**, NOT `VARCHAR`: CUBRID compresses strings, making disk size unpredictable. VARBIT is not compressed, so disk size is exact.
+- **Use `BIT VARYING` (VARBIT)**, NOT `VARCHAR`: CUBRID compresses strings, making disk size unpredictable. VARBIT is not compressed, so disk size is exact. _(Holds today; if future type-layer compression — CBRD-26756/26881 — ever extends to VARBIT, disk size stops being exact and this rule needs revisiting.)_
 - **Pattern**: `CAST(REPEAT('AA', N) AS BIT VARYING)` produces N bytes on disk.
 - **Size verification**: Use `DISK_SIZE(col)` (not `LENGTH` which returns bits).
 - **Distinct values**: Use different hex patterns ('AA', 'BB', 'CC', etc.) to distinguish values.
