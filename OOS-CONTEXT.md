@@ -2,7 +2,8 @@
 
 > Normative specification and single source of truth for CUBRID OOS. The `feat/oos` branch is an incomplete implementation being brought into conformance before merge to `develop`.
 > Last updated: 2026-07-13 | Implementation branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
-> **Spec note (2026-06-18):** OOS demotion is now **PG TOAST-style largest-first** — record gate raised to `DB_PAGESIZE/4` (4KB), profitable demotion threshold lowered to `> OR_OOS_INLINE_SIZE` (strictly greater than 16B), and only the largest attributes needed to make the record fit are externalized (not all eligible). Merged: CBRD-26776 (PR #7158). OOS+bigone coexistence is now rejected (CBRD-26937). See §1.
+> **Spec note (2026-07-13):** The fixed `DB_PAGESIZE/4` record gate is superseded by a PostgreSQL-style four-record physical-capacity target. The target subtracts heap-page fixed overhead and four slot entries, divides by four, and aligns down; like PostgreSQL TOAST, it does **not** include heap unfill/fillfactor policy. With the current 16KB I/O page layout the target is 4,060B. Tracked by CBRD-27057; see §1.
+> **Historical note (2026-06-18):** CBRD-26776 (PR #7158) introduced PG TOAST-style largest-first demotion, changed the then-current gate from 2KB to fixed 4KB, lowered the profitable demotion threshold to `> OR_OOS_INLINE_SIZE`, and stopped after reaching the target instead of externalizing every eligible value. The fixed 4KB gate is now superseded; largest-first ordering and the 16B profitability rule remain normative.
 
 ### Requirement Status
 
@@ -14,6 +15,7 @@
 ### Current Implementation Status — Non-normative
 
 - `feat/oos` is incomplete and is expected to converge on this specification before merge to `develop`.
+- CBRD-27057 replaces the raw `DB_PAGESIZE/4` gate. The current working-tree implementation uses the 4,060B physical target for both the trigger and demotion stop, excludes `PRM_ID_HF_UNFILL_FACTOR`, and has target/boundary/unfill-independence coverage.
 - Temporary crash-on-invariant instrumentation marked `REVERT BEFORE MERGE` remains in `heap_file.c` and `vacuum.c`. It is a merge-readiness item, not required OOS behavior.
 - Experimental-branch implementations do not become normative or implemented-on-`feat/oos` merely because they are described here; verify their merge status explicitly.
 
@@ -21,14 +23,14 @@
 
 | Concept | Detail |
 |---------|--------|
-| OOS trigger | record > `DB_PAGESIZE/4` (4KB on 16KB pages) → demote largest variable values (value strictly greater than `OR_OOS_INLINE_SIZE` = 16B) one-by-one until the record reaches the 4KB target or candidates are exhausted (PG TOAST-style; CBRD-26776). Type-agnostic — BLOB/CLOB locators demote like any variable value (ADR-0002) |
+| OOS trigger | record > the PostgreSQL-style four-record heap target (`heap_oos_inline_target_size()`; 4,060B with the current 16KB I/O page layout) → demote largest variable values (value strictly greater than `OR_OOS_INLINE_SIZE` = 16B) one-by-one until the record reaches the target or candidates are exhausted. The target accounts for physical heap-page/slot overhead but intentionally excludes heap unfill, matching PostgreSQL's separation of TOAST threshold and fillfactor. Type-agnostic — BLOB/CLOB locators demote like any variable value (ADR-0002) |
 | OOS file type | `FILE_OOS`, lazily created; at most one per heap file |
 | OOS inline stub | 16-byte inline reference: head OOS OID (8B) + full length (8B) |
 | HAS_OOS flag | MVCC header bit 3 (`OR_MVCC_FLAG_HAS_OOS = 0x08`) |
 | IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
 | Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
 | Branch | `feat/oos` |
-| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26668 (vacuum integration, done), CBRD-26776 (largest-first demotion, done), CBRD-26937 (OOS+bigone rejection), CBRD-26950 (vacuum slot-reuse data loss — CRITICAL), CBRD-26830 (TDE plaintext leak — security), CBRD-26912 (STORAGE PREFER_INLINE, proposed) |
+| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26668 (vacuum integration, done), CBRD-26776 (largest-first demotion, done), CBRD-27057 (four-record physical target), CBRD-26937 (OOS+bigone rejection), CBRD-26950 (vacuum slot-reuse data loss — CRITICAL), CBRD-26830 (TDE plaintext leak — security), CBRD-26912 (STORAGE PREFER_INLINE, proposed) |
 
 ### Core Terminology
 
@@ -50,7 +52,8 @@
 | OOS Expand | **Record-level, eager**: replace every OOS inline stub with its value, rebuilding the whole record (`HEAP_GET_CONTEXT.expand_oos` → `heap_record_replace_oos_oids`). For callers that consume raw recdes bytes. _Avoid_: "resolve" for this. |
 | OOS Resolve | **Attribute-level, lazy**: obtain one OOS-backed attribute's logical value on demand (`heap_attrvalue_read_oos_inline` → `oos_read`). _Avoid_: "expand" for this. |
 | OOS Read | **Storage-level**: `oos_read` follows one OOS value chain from its head OOS OID and reconstructs the complete OOS value. Do not use as a synonym for attribute-layer Resolve. |
-| OOS Demotion | **Write-time, trigger-side**: at INSERT/UPDATE, when the record exceeds `DB_PAGESIZE/4`, move the *largest* eligible variable values to OOS one-by-one until the record reaches that target or candidates are exhausted — PG TOAST-style (`heap_attrinfo_determine_disk_layout`, CBRD-26776). Not every eligible value is externalized; smaller ones may stay inline. _Avoid_: "bulk externalization" (that was the old M1 behavior). |
+| OOS inline target | Maximum aligned heap recdes length for which four records plus four slot entries physically fit on a non-header heap page. It is derived from `heap_nonheader_page_capacity()` and intentionally excludes heap unfill, like PostgreSQL `MaximumBytesPerTuple(4)` excludes relation fillfactor. |
+| OOS Demotion | **Write-time, trigger-side**: at INSERT/UPDATE, when the record exceeds the OOS inline target, move the *largest* eligible variable values to OOS one-by-one until the record reaches that target or candidates are exhausted — PG TOAST-style (`heap_attrinfo_determine_disk_layout`, CBRD-26776). Not every eligible value is externalized; smaller ones may stay inline. _Avoid_: "bulk externalization" (that was the old M1 behavior). |
 | Numerable file | A file that records page-allocation order so callers can fetch the nth page (`file_numerable_find_nth`). OOS was created numerable through `4ddbc7c`; the ADR-0001 non-numerable migration is implemented on `oos-m2-all-plans-experimental` (2026-07-02, pending verification/merge). _Avoid_: indexed file, ordered file |
 | Bestspace sync | Tier-3 fallback that walks OOS data pages once to recharge free-space hints when the cache and best[] both miss. _Avoid_: full scan, refill |
 | Sector-bitmap walk | Enumerating a file's data pages from its partial/full sector bitmap (`file_get_all_data_sectors`) instead of a page chain or page numbering — the planned OOS enumeration (ADR-0001). _Avoid_: data-sector scan |
@@ -73,28 +76,55 @@ TO-BE:
            [ big_text ]     [ big_blob ]             <- OOS file (separate)
 ```
 
-### Trigger Conditions — Largest-First Demotion (PG TOAST-style, CBRD-26776)
+### Trigger Conditions — Largest-First Demotion (CBRD-26776; physical target CBRD-27057)
 
-OOS demotion is a two-stage, **incremental** process (`heap_attrinfo_determine_disk_layout`, `heap_file.c:12097`). It mirrors PostgreSQL's tuple-toaster main loop, minus compression:
+OOS demotion is a two-stage, **incremental** process (`heap_attrinfo_determine_disk_layout`, `heap_file.c`). It mirrors PostgreSQL's tuple-toaster main loop, minus compression:
 
-1. **Record gate**: only externalize if `header_size + payload_size + mvcc_extra > DB_PAGESIZE / 4` (4KB on 16KB pages). If the record already fits, everything stays inline.
+1. **Record gate**: only externalize if `header_size + payload_size + mvcc_extra > heap_oos_inline_target_size()`. The same target is used for loop termination. With the current 16KB I/O page layout it is 4,060B. CUBRID's `DB_PAGESIZE` is 16,344B after the 40B file-I/O reservation, so neither the I/O-page quarter (4,096B) nor `DB_PAGESIZE/4` (4,086B) is the correct physical target.
 2. **Eligibility**: an attribute value is a candidate iff `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than 16B) — i.e. its value is bigger than the 16-byte OOS inline stub (head OOS OID + full length) that replaces it, so demoting it actually shrinks the record. The rule is **type-agnostic**: BLOB/CLOB values are eligible too (ADR-0002) — the in-row value is the ELO locator string, and only those locator bytes go to OOS (the LOB payload stays in external LOB storage). LOB copy semantics are preserved on the OOS path: `heap_attrinfo_dbvalue_to_recdes` performs the same `db_elo_copy_with_prefix` step as the inline writer before serializing.
-3. **Largest-first loop**: sort candidates by size **descending**, then demote one at a time (subtracting `column_size`, adding back 16B per demote), and **`break` as soon as the record drops to ≤ `DB_PAGESIZE/4`**. If candidates are exhausted first, the record may remain above the 4KB target; the later OOS+bigone guard either accepts it as an ordinary slotted-page record or rejects it if it would require `REC_BIGONE`. The smallest eligible values may remain inline.
+3. **Largest-first loop**: sort candidates by size **descending**, then demote one at a time (subtracting `column_size`, adding back 16B per demote), and **`break` as soon as the record drops to ≤ the OOS inline target**. If candidates are exhausted first, the record may remain above the target; possible values stay OOS-backed and the later OOS+bigone guard either accepts the record as an ordinary slotted-page record or rejects it if it would require `REC_BIGONE`. If there are no eligible values, `has_oos` remains false and an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid.
+
+The target follows PostgreSQL's `MaximumBytesPerTuple(4)` policy:
+
+```text
+records_per_page = 4
+page_capacity = heap_nonheader_page_capacity()
+
+oos_inline_target = ALIGN_BELOW(
+  (page_capacity - records_per_page * SPAGE_SLOT_SIZE)
+    / records_per_page,
+  HEAP_MAX_ALIGN)
+```
+
+`heap_nonheader_page_capacity()` already excludes the slotted-page header, the heap chain record, and its slot. The formula then reserves four user-record slots before dividing. It intentionally does **not** subtract `heap_hdr->unfill_space`: PostgreSQL's TOAST threshold likewise does not include relation fillfactor; fillfactor/unfill remains an independent page-selection policy.
+
+With the current 16KB layout:
+
+```text
+IO_PAGESIZE                          16,384
+DB_PAGESIZE                          16,344
+heap_nonheader_page_capacity()       16,268
+four user SPAGE_SLOT entries             16
+(16,268 - 16) / 4                    4,063
+ALIGN_BELOW(4,063, 4)                4,060
+```
+
+Therefore four target-sized recdes plus their slots physically fit (`4 × (4,060 + 4) = 16,256 ≤ 16,268`), while the next aligned record size does not (`4 × (4,064 + 4) = 16,272 > 16,268`). This is a physical-capacity invariant, not a promise that heap bestspace will ignore configured unfill and actually pack four records on every page.
 
 ```
-record > DB_PAGESIZE/4 ?
+record > oos_inline_target ?
  ├─ no  → all values inline (no OOS)
  └─ yes → candidates = variable values with size > 16B, sorted by size DESC
            for cand in candidates:
-             record already ≤ DB_PAGESIZE/4 ?  → break
+             record already ≤ oos_inline_target ?  → break
              demote cand to OOS; payload -= cand_size; payload += 16B
            candidates exhausted above target? → apply OOS+bigone rejection rule
 ```
 
-Example with DB_PAGESIZE=16K (gate = 4KB):
-- Record ~2.3KB ≤ 4KB → OOS not triggered (under the old M1 rule this *would* have triggered at the 2KB gate)
-- Record ~5KB (vc1=3000B + vc2=2000B) → demote largest (vc1) → record ~2KB ≤ 4KB → **break**. Only vc1 goes to OOS; vc2 stays inline.
-- Record ~9KB (vc1=4500B + vc2=4500B) → demote vc1 → ~4.5KB still > 4KB → demote vc2 → fits. Both go to OOS.
+Example with the current 16KB layout (target = 4,060B):
+- Record ~2.3KB ≤ 4,060B → OOS not triggered (under the old M1 rule this *would* have triggered at the 2KB gate)
+- Record ~5KB (vc1=3000B + vc2=2000B) → demote largest (vc1) → record ~2KB ≤ 4,060B → **break**. Only vc1 goes to OOS; vc2 stays inline.
+- Record ~9KB (vc1=4500B + vc2=4500B) → demote vc1 → ~4.5KB still > 4,060B → demote vc2 → fits. Both go to OOS.
 
 **Conservative estimate (always safe)**: the loop compares against the pre-loop `header_size`, which is recomputed only once *after* the loop. Because payload is monotonically decreasing and header is monotonically non-increasing, the in-loop value is an over-estimate — so the loop may **over-demote** by at most one value near a VOT offset-size boundary (BYTE↔SHORT↔INT), but can never **under-demote** relative to that estimate. Afterward, the OOS+bigone guard ensures the result is either a valid slotted-page record or a rejected write.
 
@@ -109,7 +139,7 @@ if (has_oos && heap_is_big_length (expected_size))   // expected_size = record s
     → er_set (ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE); return S_ERROR;
 ```
 
-- Rejection threshold is `heap_Maxslotted_reclength` (~16KB, the bigone threshold), **not** the 4KB demotion gate. An OOS-backed heap record left between 4KB and ~16KB is fine.
+- Rejection threshold is `heap_Maxslotted_reclength` (~16KB, the bigone threshold), **not** the OOS inline target. An OOS-backed heap record left between the target and ~16KB because candidates were exhausted is valid.
 - Only fires when `has_oos` is true; ordinary non-OOS bigone records are unaffected.
 - Gate sits before `heap_attrinfo_insert_to_oos`, so no orphan OOS value chains are written on rejection.
 
@@ -129,7 +159,7 @@ if (has_oos && heap_is_big_length (expected_size))   // expected_size = record s
 
 | | PostgreSQL (TOAST) | MySQL (Off-page) | CUBRID OOS (current) |
 |---|---|---|---|
-| **Trigger** | ~2KB (row) | ~8KB (row) | record > PAGESIZE/4 (4KB), value > 16B |
+| **Trigger** | `MaximumBytesPerTuple(4)` (~2KB), independent of fillfactor | ~8KB (row) | PG-style four-record heap target (4,060B with current 16KB I/O page layout), independent of unfill; value > 16B |
 | **Stop semantics** | Largest-first, stop when row fits | Largest-first | **Largest-first, stop when record fits (CBRD-26776)** |
 | **Separation** | Column-level | Column-level | Column-level |
 | **Inline reference size** | 18B | 20B | **16B** (OOS inline stub) |
@@ -243,7 +273,7 @@ oos_find_best_page()
 heap_insert()
   |
   +-> heap_attrinfo_determine_disk_layout()
-  |   +-> record > PAGESIZE/4?
+  |   +-> record > PG-style four-record heap target?
   |       sort eligible variable values (size > 16B) by size DESC,
   |       demote largest first until target reached or candidates exhausted
   |   +-> (reject if record still > ~16KB while has_oos -> ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE)
@@ -409,7 +439,7 @@ DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it 
 |---|---|---|
 | ~~No OOS file cleanup on DROP TABLE~~ | ~~OOS file leaked after its heap file was destroyed~~ | **DONE** (CBRD-26608: `oos_remove_file`) |
 | ~~Bestspace = last-insert-page only~~ | ~~Hotspot on single page, wasted space~~ | **DONE** (CBRD-26658: 3-tier bestspace) |
-| ~~Bulk-externalize every variable value > 512B~~ | ~~Small values needlessly go OOS → extra `oos_read` I/O, OOS file bloat~~ | **DONE** (CBRD-26776: largest-first incremental demotion; record gate 2KB→4KB, profitable threshold 512B→strictly greater than 16B) |
+| ~~Bulk-externalize every variable value > 512B~~ | ~~Small values needlessly go OOS → extra `oos_read` I/O, OOS file bloat~~ | **DONE** (CBRD-26776: largest-first incremental demotion; historical gate 2KB→4KB, later superseded by the PG-style four-record target; profitable threshold 512B→strictly greater than 16B) |
 | ~~No deferred OOS cleanup after DELETE/UPDATE~~ | ~~Dead record versions left their OOS value chains permanently allocated~~ | **DONE** (CBRD-26668: vacuum integration) |
 | No OOS value-chain reuse on update | Extra I/O when value unchanged | Future improvement (deduplication; M3 cancelled, not in M2) |
 | Ordered fix deadlock risk | Two tx's accessing OOS pages in different order | Future improvement (M4 cancelled, not in M2) |
@@ -448,7 +478,7 @@ DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it 
 - **Pattern**: `CAST(REPEAT('AA', N) AS BIT VARYING)` produces N bytes on disk.
 - **Size verification**: Use `DISK_SIZE(col)` (not `LENGTH` which returns bits).
 - **Distinct values**: Use different hex patterns ('AA', 'BB', 'CC', etc.) to distinguish values.
-- **OOS trigger**: record > 4KB (`DB_PAGESIZE/4` on 16KB pages); then the *largest* variable values (size strictly greater than 16B) are demoted one-by-one until the record reaches the target or candidates are exhausted — **not** every eligible value. To force OOS, make the record clearly exceed 4KB.
+- **OOS trigger**: record > the PG-style four-record heap target (4,060B with the current 16KB I/O page layout); then the *largest* variable values (size strictly greater than 16B) are demoted one-by-one until the record reaches the target or candidates are exhausted — **not** every eligible value. The target excludes heap unfill, matching PG's separation of TOAST threshold and fillfactor.
 
 ### Common Table Setup
 
@@ -467,7 +497,7 @@ CREATE TABLE oos_test (
 #### 1. Basic CRUD (4 tests)
 - **1.1 Insert + Select consistency**: Insert an OOS-backed heap record, verify `DISK_SIZE()` and value equality
 - **1.2 Non-trigger verification**: Records below threshold stay in heap (no OOS)
-- **1.3 Largest-first demotion (discriminating test for CBRD-26776)**: Record > 4K with two unequal eligible columns; verify only the largest is demoted and the smaller stays inline. Release builds can't see per-column OOS placement (`DISK_SIZE` returns the logical value size regardless), so confirm via debug `oos.log` `oos_insert ... src.size=` (CBRD-26871)
+- **1.3 Largest-first demotion (discriminating test for CBRD-26776)**: Record > the OOS inline target with two unequal eligible columns; verify only the largest values needed to reach the target are demoted. Release builds can't see per-attribute OOS placement (`DISK_SIZE` returns the logical value size regardless), so confirm via debug `oos.log` `oos_insert ... src.size=` (CBRD-26871)
 - **1.4 Bulk insert**: 100+ rows with varying sizes, verify all sizes correct
 
 #### 2. UPDATE (3 tests)
@@ -506,12 +536,12 @@ CREATE TABLE oos_test (
 - **8.1-8.4**: INSERT/UPDATE/DELETE/multi-chunk operations replicated correctly to slave. Verify value equality (OOS OIDs may differ between master and slave).
 
 #### 9. Edge Cases (6 tests)
-- **9.1 Record gate boundary**: Record exactly at 4KB (`DB_PAGESIZE/4`) boundary
-- **9.2 Column eligibility floor**: Variable column ≤ 16B (`OR_OOS_INLINE_SIZE`) is never demoted, even when the record > 4KB (demoting it wouldn't shrink the record)
+- **9.1 Record gate boundary**: Verify the derived target and both sides of the boundary; with the current layout, 4,060B does not trigger and the next representable aligned size does
+- **9.2 Column eligibility floor**: Variable value ≤ 16B (`OR_OOS_INLINE_SIZE`) is never demoted, even when the record exceeds the target (demoting it would not shrink the record)
 - **9.3 NULL values**: NULL in OOS-eligible column
 - **9.4 Empty values**: Zero-length VARBIT in OOS-eligible column
 - **9.5 Many OOS-backed attributes**: 10+ attributes demoted in a single heap record
-- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375), row not stored. A non-OOS bigone, or an OOS-backed heap record left between 4KB and ~16KB, still succeeds
+- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375), row not stored. A non-OOS bigone, or an OOS-backed heap record left between the OOS inline target and ~16KB because candidates were exhausted, still succeeds
 
 #### 10. Stress Tests (2 tests)
 - **10.1 Bulk 1000+ rows**: All with OOS, verify all values correct
@@ -520,11 +550,11 @@ CREATE TABLE oos_test (
 ### Key Test SQL Pattern
 
 ```sql
--- OOS INSERT + verify (record must clear DB_PAGESIZE/4 = 4KB to trigger demotion)
+-- OOS INSERT + verify (record must exceed the derived OOS inline target; 4,060B in the current layout)
 CREATE TABLE t (id INT, vc1 BIT VARYING, vc2 BIT VARYING);
 INSERT INTO t VALUES (1, CAST(REPEAT('AA', 3000) AS BIT VARYING),
                          CAST(REPEAT('BB', 2000) AS BIT VARYING));
--- Record ~5KB > 4KB → largest (vc1) demoted to OOS → ~2KB fits → vc2 stays inline
+-- Record ~5KB > target → largest (vc1) demoted to OOS → ~2KB fits → vc2 stays inline
 
 -- Verify size (DISK_SIZE is the logical value size — identical whether inline or OOS)
 SELECT id, DISK_SIZE(vc1), DISK_SIZE(vc2) FROM t WHERE id = 1;
@@ -565,6 +595,6 @@ When writing OOS-related code comments or documentation:
 - Use **OOS-backed attribute** for a particular row value; a schema column is merely eligible and its values may remain inline
 - Use **OOS file** / **OOS value** / **OOS chunk record** when referring to a concrete object; use **OOS subsystem** for the feature as a whole
 - Always add a space between inline code and Korean text: `` `oos_read` 는 `` (not `` `oos_read`는 ``)
-- Use exact thresholds (`DB_PAGESIZE/4` record demotion gate, profitable demotion threshold `> OR_OOS_INLINE_SIZE`, strictly greater than 16B) — the old `DB_PAGESIZE/8` / 512B values are historical, pre-CBRD-26776 behavior
+- Describe the record demotion gate as the **PG-style four-record heap target** derived by `heap_oos_inline_target_size()`; do not call it raw `DB_PAGESIZE/4`. State that it excludes heap unfill, like PG TOAST excludes fillfactor. The profitable demotion threshold remains `> OR_OOS_INLINE_SIZE` (strictly greater than 16B); `DB_PAGESIZE/8` / 512B are historical pre-CBRD-26776 values
 - State ownership as: each OOS value chain is owned by exactly one logical heap-record version; value chains are not shared across versions
 - Do not describe unimplemented features as existing (no PEEK mode, no OOS dedup, no across-page compaction in M1)
