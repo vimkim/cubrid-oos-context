@@ -1,9 +1,10 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for CUBRID OOS. The `feat/oos` branch is an incomplete implementation being brought into conformance before merge to `develop`.
-> Last updated: 2026-07-13 | Implementation branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
+> Last updated: 2026-08-13 | Implementation branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
 > **Spec note (2026-07-13):** The fixed `DB_PAGESIZE/4` record gate is superseded by a PostgreSQL-style four-record physical-capacity target. The target subtracts heap-page fixed overhead and four slot entries, divides by four, and aligns down; like PostgreSQL TOAST, it does **not** include heap unfill/fillfactor policy. With the current 16KB I/O page layout the target is 4,060B. Tracked by CBRD-27057; see §1.
 > **Historical note (2026-06-18):** CBRD-26776 (PR #7158) introduced PG TOAST-style largest-first demotion, changed the then-current gate from 2KB to fixed 4KB, lowered the profitable demotion threshold to `> OR_OOS_INLINE_SIZE`, and stopped after reaching the target instead of externalizing every eligible value. The fixed 4KB gate is now superseded; largest-first ordering and the 16B profitability rule remain normative.
+> **Spec note (2026-08-13):** The M1 always-new-chain UPDATE rule and the vacuum forward-walk cleanup are superseded by the accepted **CBRD-27230** design: UPDATE reuses OOS value chains for attributes **not assigned** by the statement; dropped chains are announced via a **commit-conditional `RVOOS_NOTIFY_VACUUM` record** (emitted from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected generation)` pairs) consumed by vacuum; the forward-walk is **removed**. DELETE (REMOVE path) and the SA_MODE eager path are unchanged. Replication gains a per-reused-attribute marker item + replica-side fixup (same spec). CBRD-26950 is a hard prerequisite (sole source of vacuum-retry idempotency). Not yet implemented. See §3 UPDATE for the superseding ownership invariant. Related bug filed from the same analysis: **CBRD-27237** (current forward-walk deletes a rolled-back UPDATE's old chains — fixed by this design's commit-conditional emission).
 
 ### Requirement Status
 
@@ -30,7 +31,7 @@
 | IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
 | Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
 | Branch | `feat/oos` |
-| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26668 (vacuum integration, done), CBRD-26776 (largest-first demotion, done), CBRD-27057 (four-record physical target), CBRD-26937 (OOS+bigone rejection), CBRD-26950 (vacuum slot-reuse data loss — CRITICAL), CBRD-26830 (TDE plaintext leak — security), CBRD-26912 (STORAGE PREFER_INLINE, proposed) |
+| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26668 (vacuum integration, done), CBRD-26776 (largest-first demotion, done), CBRD-27057 (four-record physical target), CBRD-26937 (OOS+bigone rejection), CBRD-26950 (vacuum slot-reuse data loss — CRITICAL, fix design locked), CBRD-26830 (TDE plaintext leak — security), CBRD-26912 (STORAGE PREFER_INLINE, proposed), CBRD-27230 (UPDATE chain reuse + notify-log cleanup — accepted design), CBRD-27237 (forward-walk rollback data loss — fixed by CBRD-27230 design) |
 
 ### Core Terminology
 
@@ -364,9 +365,11 @@ Step 3: Old OOS value chain stays alive
   -> vacuum will oos_delete when cleaning old heap record from undo log
 ```
 
-**Ownership invariant**: Each OOS value chain is owned by exactly one logical heap-record version. OOS value chains are not shared across record versions. The inline stub stores the head OOS OID; non-head OOS OIDs are linked from the preceding chunk record.
+**Ownership invariant (M1, superseded on paper)**: Each OOS value chain is owned by exactly one logical heap-record version. OOS value chains are not shared across record versions. The inline stub stores the head OOS OID; non-head OOS OIDs are linked from the preceding chunk record.
 
-**Current limitation**: Always creates a new OOS value chain and head OOS OID even if the value is unchanged. Value-chain reuse is **deferred to a future improvement** — it is NOT in M2 scope (M3, which had planned it, is cancelled). Verified against code: UPDATE always allocates fresh value chains (`heap_attrinfo_insert_to_oos`), which the vacuum forward-walk relies on for old/new head-OID disjointness.
+**Superseding ownership invariant (accepted design — CBRD-27230, 2026-08-13; effective once implemented)**: An OOS value chain is owned by the newest logical record version that references it; older versions hold borrowed references via their undo images. A chain is released exactly once — by the commit of the UPDATE that dropped it (`RVOOS_NOTIFY_VACUUM`, consumed by vacuum) or by vacuum's removal of the row's last version (REMOVE path). Undo images are never a deletion source.
+
+**Current implementation**: Always creates a new OOS value chain and head OOS OID even if the value is unchanged. Value-chain reuse is now an **accepted design (CBRD-27230)**, not yet implemented; the current code's vacuum forward-walk still relies on old/new head-OID disjointness (`heap_attrinfo_insert_to_oos` always allocates fresh chains).
 
 ### DELETE
 
@@ -423,7 +426,8 @@ DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it 
 
 | Issue | Description | Impact | JIRA |
 |---|---|---|---|
-| **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — `oos_record_header` has no owner OID / generation. Found in PR #6986 review | **CRITICAL — silent data loss.** Fix (owner/generation field in chunk header) TBD/ANALYSIS | CBRD-26950 |
+| **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — `oos_record_header` has no owner OID / generation. Found in PR #6986 review | **CRITICAL — silent data loss.** Fix design locked (2026-08-13): generation identity stamp — stub 16B→20B, chunk header +4B generation, page slot-0 counter, `oos_delete(expected_generation)` no-op on mismatch/absence | CBRD-26950 |
+| **Vacuum deletes a rolled-back UPDATE's old chains** | The forward-walk acts on undo-image content with no commit/abort filter (`vacuum_process_log_record` gates only dropped files and rcvindex); rollback restores the pre-image whose stubs still reference the old chains, the aborted MVCCID retires normally, and the forward-walk then deletes the live row's chains. Analysis-based (no runtime repro); needs no block retry — single normal vacuum run suffices. Not preventable by the CBRD-26950 stamp (undo image and live stub carry the same (head OID, generation)) | **Data loss (merge gate).** Fixed by CBRD-27230's commit-conditional notify emission (forward-walk removed) | CBRD-27237 |
 | ~~TDE not applied to OOS pages~~ | **DONE on `feat/oos`**: CBRD-26830 / commit `138f624964` added both defenses: `xfile_apply_tde_to_class_files` includes an existing OOS file, and lazy creation applies the class TDE algorithm before publishing the OOS VFID | Fixed 2026-06-16 | CBRD-26830 |
 | ~~OOS inline-stub writer bounds-checked the wrong pointer~~ | **DONE on `feat/oos`**: CBRD-26814 / commit `bceac0ddc` checks the actual stub write position `*ptr_varvals`, restoring the `S_DOESNT_FIT` grow-and-retry path. BLOB/CLOB locators remain OOS-demotable per ADR-0002 | Fixed 2026-07-03 | CBRD-26814 |
 | unloaddb 1.6-1.7x slower | `heap_attrinfo_start` called per `heap_next` in `feat/oos` branch | Performance regression | CBRD-26458 |
@@ -441,7 +445,7 @@ DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it 
 | ~~Bestspace = last-insert-page only~~ | ~~Hotspot on single page, wasted space~~ | **DONE** (CBRD-26658: 3-tier bestspace) |
 | ~~Bulk-externalize every variable value > 512B~~ | ~~Small values needlessly go OOS → extra `oos_read` I/O, OOS file bloat~~ | **DONE** (CBRD-26776: largest-first incremental demotion; historical gate 2KB→4KB, later superseded by the PG-style four-record target; profitable threshold 512B→strictly greater than 16B) |
 | ~~No deferred OOS cleanup after DELETE/UPDATE~~ | ~~Dead record versions left their OOS value chains permanently allocated~~ | **DONE** (CBRD-26668: vacuum integration) |
-| No OOS value-chain reuse on update | Extra I/O when value unchanged | Future improvement (deduplication; M3 cancelled, not in M2) |
+| No OOS value-chain reuse on update | Extra I/O when value unchanged | **Accepted design — CBRD-27230** (2026-08-13): reuse for UPDATE-unassigned attributes + commit-conditional `RVOOS_NOTIFY_VACUUM` cleanup, forward-walk removed. Not yet implemented; requires CBRD-26950 |
 | Ordered fix deadlock risk | Two tx's accessing OOS pages in different order | Future improvement (M4 cancelled, not in M2) |
 | No PEEK mode for OOS reads | Always COPY semantics, extra memcpy | Future |
 | No across-page compaction | Fragmentation over time | Future |
