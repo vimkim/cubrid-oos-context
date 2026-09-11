@@ -1,11 +1,14 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for CUBRID OOS. The `feat/oos` branch is an incomplete implementation being brought into conformance before merge to `develop`.
-> Last updated: 2026-08-28 | Implementation branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
+> Last updated: 2026-09-09 | Implementation branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
+> **Identity layout reconciliation (2026-09-09, CBRD-26950):** The accepted PR #7695 design uses the pre-insert page LSA as an identity stamp. The OOS inline stub and chunk header are each 24 bytes; the stub contains the head OOS OID, full length, and packed head identity stamp (8 bytes each). This supersedes the former 16-byte layout and the rejected counter proposal. Verified implementation: PR head `eaf1165bb` over base `f4299ac0c`, with all six accepted review-repair slices done (stub field bounds, stale and retyped reference handling, eager cleanup diagnostics, the logging precondition, undo/redo identity preservation, and the verification pass); this is not a claim that the PR is merged. The accepted repair policy diagnoses skipped eager cleanup while completing DML, retains silent vacuum skips, and preserves no-logging bulk loads with the logging precondition stated below.
 > **Spec note (2026-08-28):** Empty-page reclaim (CBRD-26786) is accepted as an **invariant, not a best-effort optimization**: every fully emptied OOS data page is eventually returned to the file manager, and an OOS file reserves a new sector only when no safely reclaimable empty page exists right now. Three mechanisms deliver it — the vacuum fast path (batch reclaim API, two-phase check), the **LSA reclaim gate** (pages whose last writer may still be a live undo source are deferred), and the **growth-gate sweep** (a per-VFID pending-delete counter arms an incremental, cursor-resumed sector-bitmap sweep at the file's single growth point; a boot rule absorbs hint loss). Covers the SA/non-MVCC eager path. Implemented on PR #7617 (head `8ba9b5398`, includes reviewer fixes R3/R4/B1), **pending merge to `feat/oos`** — verify merge status before citing as implemented-on-feat/oos.
 > **Spec note (2026-07-13):** The fixed `DB_PAGESIZE/4` record gate is superseded by a PostgreSQL-style four-record physical-capacity target. The target subtracts heap-page fixed overhead and four slot entries, divides by four, and aligns down; like PostgreSQL TOAST, it does **not** include heap unfill/fillfactor policy. With the current 16KB I/O page layout the target is 4,060B. Tracked by CBRD-27057; see §1.
-> **Historical note (2026-06-18):** CBRD-26776 (PR #7158) introduced PG TOAST-style largest-first demotion, changed the then-current gate from 2KB to fixed 4KB, lowered the profitable demotion threshold to `> OR_OOS_INLINE_SIZE`, and stopped after reaching the target instead of externalizing every eligible value. The fixed 4KB gate is now superseded; largest-first ordering and the 16B profitability rule remain normative.
-> **Spec note (2026-08-13):** The M1 always-new-chain UPDATE rule and the vacuum forward-walk cleanup are superseded by the accepted **CBRD-27230** design: UPDATE reuses OOS value chains for attributes **not assigned** by the statement; dropped chains are announced via a **commit-conditional `RVOOS_NOTIFY_VACUUM` record** (emitted from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected generation)` pairs) consumed by vacuum; the forward-walk is **removed**. DELETE (REMOVE path) and the SA_MODE eager path are unchanged. Replication gains a per-reused-attribute marker item + replica-side fixup (same spec). CBRD-26950 is a hard prerequisite (sole source of vacuum-retry idempotency). Not yet implemented. See §3 UPDATE for the superseding ownership invariant. Related bug filed from the same analysis: **CBRD-27237** (current forward-walk deletes a rolled-back UPDATE's old chains — fixed by this design's commit-conditional emission).
+> **Historical note (2026-06-18):** CBRD-26776 (PR #7158) introduced PG TOAST-style largest-first demotion, changed the then-current gate from 2KB to fixed 4KB, lowered the profitable demotion threshold to `> OR_OOS_INLINE_SIZE`, and stopped after reaching the target instead of externalizing every eligible value. The fixed 4KB gate is now superseded; largest-first ordering remains normative; CBRD-26950 updates the profitability floor to the accepted 24-byte stub size.
+> **Spec note (2026-08-13):** The M1 always-new-chain UPDATE rule and the vacuum forward-walk cleanup are superseded by the accepted **CBRD-27230** design: UPDATE reuses OOS value chains for attributes **not assigned** by the statement; dropped chains are announced via a **commit-conditional `RVOOS_NOTIFY_VACUUM` record** (emitted from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs) consumed by vacuum; the forward-walk is **removed**. DELETE (REMOVE path) and the SA_MODE eager path are unchanged. Replication gains a per-reused-attribute marker item + replica-side fixup (same spec). CBRD-26950 is a hard prerequisite (sole source of vacuum-retry idempotency). Not yet implemented. See §3 UPDATE for the superseding ownership invariant. Related bug filed from the same analysis: **CBRD-27237** (current forward-walk deletes a rolled-back UPDATE's old chains — fixed by this design's commit-conditional emission).
+
+> **CDC/flashback decision (2026-09-08):** CBRD-26939 will preserve OOS historical values in durable supplemental images, retaining ordinary recovery logging and normal reclamation. Newly written history is guaranteed; unreconstructible legacy OOS images receive explicit errors. Image-recording failures fail the write; new-format writes require upgraded readers, with downgrade unsupported. Encoding and compatibility enforcement remain to be specified. Accepted direction, **not implemented**; see [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md).
 
 ### Requirement Status
 
@@ -25,9 +28,9 @@
 
 | Concept | Detail |
 |---------|--------|
-| OOS trigger | record > the PostgreSQL-style four-record heap target (`heap_oos_inline_target_size()`; 4,060B with the current 16KB I/O page layout) → demote largest variable values (value strictly greater than `OR_OOS_INLINE_SIZE` = 16B) one-by-one until the record reaches the target or candidates are exhausted. The target accounts for physical heap-page/slot overhead but intentionally excludes heap unfill, matching PostgreSQL's separation of TOAST threshold and fillfactor. Type-agnostic — BLOB/CLOB locators demote like any variable value (ADR-0002) |
+| OOS trigger | record > the PostgreSQL-style four-record heap target (`heap_oos_inline_target_size()`; 4,060B with the current 16KB I/O page layout) → demote largest variable values (value strictly greater than `OR_OOS_INLINE_SIZE` = 24B) one-by-one until the record reaches the target or candidates are exhausted. The target accounts for physical heap-page/slot overhead but intentionally excludes heap unfill, matching PostgreSQL's separation of TOAST threshold and fillfactor. Type-agnostic — BLOB/CLOB locators demote like any variable value (ADR-0002) |
 | OOS file type | `FILE_OOS`, lazily created; at most one per heap file |
-| OOS inline stub | 16-byte inline reference: head OOS OID (8B) + full length (8B) |
+| OOS inline stub | 24-byte inline reference: head OOS OID (8B) + full length (8B) + packed identity stamp (8B) |
 | HAS_OOS flag | MVCC header bit 3 (`OR_MVCC_FLAG_HAS_OOS = 0x08`) |
 | IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
 | Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
@@ -47,7 +50,7 @@
 | OOS OID | The 8-byte physical `OID` of one OOS chunk record (volid 2B + pageid 4B + slotid 2B) |
 | Head OOS OID | The OOS OID stored in an inline stub; identifies chunk index 0 of the value chain |
 | Next-chunk OID | The OOS OID in an OOS record header that links to the following chunk record |
-| OOS inline stub | The 16-byte heap representation of an OOS-backed attribute: head OOS OID (8B) + full length (8B) |
+| OOS inline stub | The 24-byte heap representation of an OOS-backed attribute: head OOS OID (8B) + full length (8B) + packed identity stamp (8B) |
 | Full length | Total serialized OOS value length across all chunks, excluding OOS record headers |
 | HAS_OOS flag | Record-level MVCC header flag — true iff the heap record contains at least one OOS inline stub |
 | IS_OOS flag | Per-attribute VOT flag — true iff this variable-area entry contains an OOS inline stub instead of an inline value |
@@ -75,7 +78,7 @@ AS-IS:
 [ id | name | big_text (4.5KB) | big_blob (4.5KB) ]  <- entire heap record (~9KB > 4KB)
 
 TO-BE:
-[ id | name | OOS inline stub (16B) | OOS inline stub (16B) ] <- compact heap record
+[ id | name | OOS inline stub (24B) | OOS inline stub (24B) ] <- compact heap record
                   |                |
                   v                v
            [ big_text ]     [ big_blob ]             <- OOS file (separate)
@@ -86,8 +89,8 @@ TO-BE:
 OOS demotion is a two-stage, **incremental** process (`heap_attrinfo_determine_disk_layout`, `heap_file.c`). It mirrors PostgreSQL's tuple-toaster main loop, minus compression:
 
 1. **Record gate**: only externalize if `header_size + payload_size + mvcc_extra > heap_oos_inline_target_size()`. The same target is used for loop termination. With the current 16KB I/O page layout it is 4,060B. CUBRID's `DB_PAGESIZE` is 16,344B after the 40B file-I/O reservation, so neither the I/O-page quarter (4,096B) nor `DB_PAGESIZE/4` (4,086B) is the correct physical target.
-2. **Eligibility**: an attribute value is a candidate iff `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than 16B) — i.e. its value is bigger than the 16-byte OOS inline stub (head OOS OID + full length) that replaces it, so demoting it actually shrinks the record. The rule is **type-agnostic**: BLOB/CLOB values are eligible too (ADR-0002) — the in-row value is the ELO locator string, and only those locator bytes go to OOS (the LOB payload stays in external LOB storage). LOB copy semantics are preserved on the OOS path: `heap_attrinfo_dbvalue_to_recdes` performs the same `db_elo_copy_with_prefix` step as the inline writer before serializing.
-3. **Largest-first loop**: sort candidates by size **descending**, then demote one at a time (subtracting `column_size`, adding back 16B per demote), and **`break` as soon as the record drops to ≤ the OOS inline target**. If candidates are exhausted first, the record may remain above the target; possible values stay OOS-backed and the later OOS+bigone guard either accepts the record as an ordinary slotted-page record or rejects it if it would require `REC_BIGONE`. If there are no eligible values, `has_oos` remains false and an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid.
+2. **Eligibility**: an attribute value is a candidate iff `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than 24B) — i.e. its value is bigger than the 24-byte OOS inline stub (head OOS OID + full length + identity stamp) that replaces it, so demoting it actually shrinks the record. The rule is **type-agnostic**: BLOB/CLOB values are eligible too (ADR-0002) — the in-row value is the ELO locator string, and only those locator bytes go to OOS (the LOB payload stays in external LOB storage). LOB copy semantics are preserved on the OOS path: `heap_attrinfo_dbvalue_to_recdes` performs the same `db_elo_copy_with_prefix` step as the inline writer before serializing.
+3. **Largest-first loop**: sort candidates by size **descending**, then demote one at a time (subtracting `column_size`, adding back 24B per demote), and **`break` as soon as the record drops to ≤ the OOS inline target**. If candidates are exhausted first, the record may remain above the target; possible values stay OOS-backed and the later OOS+bigone guard either accepts the record as an ordinary slotted-page record or rejects it if it would require `REC_BIGONE`. If there are no eligible values, `has_oos` remains false and an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid.
 
 The target follows PostgreSQL's `MaximumBytesPerTuple(4)` policy:
 
@@ -119,10 +122,10 @@ Therefore four target-sized recdes plus their slots physically fit (`4 × (4,060
 ```
 record > oos_inline_target ?
  ├─ no  → all values inline (no OOS)
- └─ yes → candidates = variable values with size > 16B, sorted by size DESC
+ └─ yes → candidates = variable values with size > 24B, sorted by size DESC
            for cand in candidates:
              record already ≤ oos_inline_target ?  → break
-             demote cand to OOS; payload -= cand_size; payload += 16B
+             demote cand to OOS; payload -= cand_size; payload += 24B
            candidates exhausted above target? → apply OOS+bigone rejection rule
 ```
 
@@ -137,7 +140,7 @@ Example with the current 16KB layout (target = 4,060B):
 
 ### OOS + bigone Rejection (CBRD-26937)
 
-Demotion only moves *variable* attributes, so a record can still exceed the bigone threshold after every eligible value is demoted — e.g. a huge fixed-length `BIT(n)`/`CHAR` attribute, or many `≤16B` variable values. A record that contains OOS inline stubs **and** would be stored as a `REC_BIGONE` overflow record is an unsupported combination. `heap_attrinfo_transform_to_disk_internal` rejects it — *after* demotion, *before* writing any OOS value chain — with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375):
+Demotion only moves *variable* attributes, so a record can still exceed the bigone threshold after every eligible value is demoted — e.g. a huge fixed-length `BIT(n)`/`CHAR` attribute, or many `≤24B` variable values. A record that contains OOS inline stubs **and** would be stored as a `REC_BIGONE` overflow record is an unsupported combination. `heap_attrinfo_transform_to_disk_internal` rejects it — *after* demotion, *before* writing any OOS value chain — with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375):
 
 ```
 if (has_oos && heap_is_big_length (expected_size))   // expected_size = record size after demotion
@@ -164,10 +167,10 @@ if (has_oos && heap_is_big_length (expected_size))   // expected_size = record s
 
 | | PostgreSQL (TOAST) | MySQL (Off-page) | CUBRID OOS (current) |
 |---|---|---|---|
-| **Trigger** | `MaximumBytesPerTuple(4)` (~2KB), independent of fillfactor | ~8KB (row) | PG-style four-record heap target (4,060B with current 16KB I/O page layout), independent of unfill; value > 16B |
+| **Trigger** | `MaximumBytesPerTuple(4)` (~2KB), independent of fillfactor | ~8KB (row) | PG-style four-record heap target (4,060B with current 16KB I/O page layout), independent of unfill; value > 24B |
 | **Stop semantics** | Largest-first, stop when row fits | Largest-first | **Largest-first, stop when record fits (CBRD-26776)** |
 | **Separation** | Column-level | Column-level | Column-level |
-| **Inline reference size** | 18B | 20B | **16B** (OOS inline stub) |
+| **Inline reference size** | 18B | 20B | **24B** (OOS inline stub) |
 | **Compression** | pglz / lz4 | COMPRESSED format | None — deferred to future; CTO leans type-layer (`mr_data_writeval`), not OOS-layer (see Design Discussions) |
 | **Storage** | TOAST table | Overflow pages | OOS file (FILE_OOS) |
 | **Chunk split** | ~2KB chunks | Page-unit chain | OOS page-unit chain |
@@ -200,11 +203,11 @@ Heap Record (on disk):
 VOT Entry (per variable column):
   [offset_value (30 bits) | RESERVED (1 bit) | IS_OOS (1 bit)]
 
-  IS_OOS = 1  ->  variable area contains an OOS inline stub (16 bytes) at this offset
+  IS_OOS = 1  ->  variable area contains an OOS inline stub (24 bytes) at this offset
   IS_OOS = 0  ->  variable area contains actual value at this offset
 
-OOS inline stub (OR_OOS_INLINE_SIZE = 16 bytes):
-  [head OOS OID (8 bytes) | full length (8-byte DB_BIGINT)]
+OOS inline stub (OR_OOS_INLINE_SIZE = 24 bytes):
+  [head OOS OID (8B) | full length (8B bigint) | identity stamp (8B packed LSA)]
 
 MVCC Header Flags (5 bits total):
   bit 0: has insert ID
@@ -227,21 +230,27 @@ Insertion order (reverse):
   chunk_1 (middle)        -> inserted second, next_oid = chunk_2 OID
   chunk_0 (head of value) -> inserted last, next_oid = chunk_1 OID
 
-  Heap record's inline stub stores the head OOS OID pointing to chunk_0.
+  Heap record's inline stub stores the head OOS OID and identity stamp of chunk_0.
 
 Read order (forward):
   Follow chain: chunk_0 -> chunk_1 -> chunk_2 -> reassemble value
 
-Each OOS chunk record:
-+-------------------+-------------+------------------+-----------------------------+
-| total_data_length | chunk_index | next-chunk OID   | payload fragment            |
-| (4-byte int)      | (4-byte int)| (8B; NULL last)  | (up to max chunk payload)   |
-+-------------------+-------------+------------------+-----------------------------+
+Each OOS chunk record (24-byte header followed by payload):
++-------------------+-------------+------------------+----------------+------------------+
+| total_data_length | chunk_index | next-chunk OID   | identity_stamp | payload fragment |
+| 4B                | 4B          | 8B; NULL last    | 8B LOG_LSA     | variable length  |
++-------------------+-------------+------------------+----------------+------------------+
 
 total_data_length is the complete OOS value length and excludes every OOS record header.
 ```
 
 Reverse insertion reason: when inserting earlier chunks, the next chunk's OID must already be known.
+
+Each chunk stores the page LSA captured under its write latch before its insert is logged. The stub stores only the head chunk's stamp; stamps are not chain-wide. Insert redo and delete undo restore the stored stamp from the logged chunk image. The inline representation packs the stamp into one bigint, while the chunk header stores raw `LOG_LSA`. Existing test databases and install artifacts must match this unreleased layout; recreate databases built with the older layout.
+
+**Accepted logging policy (2026-09-09):** Stamp uniqueness across slot reuse and the resulting retry-safety guarantee require logged operations. No-logging bulk loads remain supported; skipped log appends do not advance the page LSA, so same-slot reuse can repeat a stamp in that mode. Callers must not rely on stamp-based stale-reference discrimination when logging is disabled. The precondition is on the actual logging state (`log_is_no_logging`), which SA `loaddb --no-logging` turns on after startup, so the startup parameter does not answer it. This exception does not change the logged-operation guarantee or authorize a future producer of unsafe stale references. No alternative identity mechanism is introduced by this repair.
+
+**Accepted eager-cleanup policy (2026-09-09):** Vacuum treats an absent or reused head as a successful silent skip. Eager reclamation completes DML but emits a diagnostic when cleanup is skipped; the successful call leaves no stray error in the error stack. Matching malformed heads and operational failures remain errors. Implementation and regression verification of this policy are pending the PR repair.
 
 ### Best Page Policy (3-Tier Bestspace — M2, CBRD-26658)
 
@@ -279,7 +288,7 @@ heap_insert()
   |
   +-> heap_attrinfo_determine_disk_layout()
   |   +-> record > PG-style four-record heap target?
-  |       sort eligible variable values (size > 16B) by size DESC,
+  |       sort eligible variable values (size > 24B) by size DESC,
   |       demote largest first until target reached or candidates exhausted
   |   +-> (reject if record still > ~16KB while has_oos -> ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE)
   |
@@ -289,7 +298,7 @@ heap_insert()
   |   +-> oos_insert() -> returns head OOS OID
   |
   +-> Build heap record:
-      +-> variable area: OOS inline stub (16B) + IS_OOS flag in VOT
+      +-> variable area: OOS inline stub (24B) + IS_OOS flag in VOT
       +-> MVCC header: set HAS_OOS flag
       +-> spage_insert() into heap page
 
@@ -399,7 +408,7 @@ heap_delete()
 
 These invariants MUST hold — test scenarios verify each one:
 
-1. **WAL completeness**: Every OOS insert/delete is logged. After crash + recovery, OOS state matches the last committed transaction state.
+1. **WAL completeness**: With logging enabled, every OOS insert/delete is logged, and crash recovery restores the last committed transaction state. The accepted no-logging bulk-load exception omits these recovery and stamp-uniqueness guarantees; see the logging policy in §2.
 2. **Undo correctness**: Update/delete undo retains the previous record **as-is, including its OOS inline stubs** — undo does NOT store resolved values (that would bloat the undo log and defeat the whole point of OOS). Rollback restores the previous record, whose head OOS OIDs still point to live value chains; MVCC snapshot reads reconstruct the old version the same way (via `prev_version_lsa` → undo recdes → `oos_read`), which is exactly why old OOS value chains must survive until vacuum (see invariant 3). The vacuum forward-walk depends on this — it extracts head OOS OIDs straight out of the undo recdes. _(Corrected 2026-06-02: the prior text claimed undo holds fully-resolved values with no stubs, which contradicts invariant 3 and the code; it had misled a fix proposal toward deleting old OOS values inline.)_
 3. **No orphan OOS value chains after update**: On update, old OOS value chains remain for MVCC. When vacuum removes the old heap-record version, `oos_delete()` cleans up its value chains.
 4. **Delete safety**: Deleted heap records retain their OOS inline stubs. OOS value chains are NOT deleted at delete time — they remain accessible until vacuum.
@@ -430,8 +439,8 @@ DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it 
 
 | Issue | Description | Impact | JIRA |
 |---|---|---|---|
-| **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — `oos_record_header` has no owner OID / generation. Found in PR #6986 review | **CRITICAL — silent data loss.** Fix design locked (2026-08-13): generation identity stamp — stub 16B→20B, chunk header +4B generation, page slot-0 counter, `oos_delete(expected_generation)` no-op on mismatch/absence | CBRD-26950 |
-| **Vacuum deletes a rolled-back UPDATE's old chains** | The forward-walk acts on undo-image content with no commit/abort filter (`vacuum_process_log_record` gates only dropped files and rcvindex); rollback restores the pre-image whose stubs still reference the old chains, the aborted MVCCID retires normally, and the forward-walk then deletes the live row's chains. Analysis-based (no runtime repro); needs no block retry — single normal vacuum run suffices. Not preventable by the CBRD-26950 stamp (undo image and live stub carry the same (head OID, generation)) | **Data loss (merge gate).** Fixed by CBRD-27230's commit-conditional notify emission (forward-walk removed) | CBRD-27237 |
+| **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — the pre-fix `oos_record_header` had no identity stamp. Found in PR #6986 review | **CRITICAL — silent data loss on the pre-fix implementation.** Accepted replacement design (2026-09-04): page-LSA identity stamp, 24-byte stub and chunk header, identity-checked delete. PR #7695 head `c09d6c6d9` implements the design; review repairs and policy decisions remain open (2026-09-09). The former slot-0 counter proposal was rejected. | CBRD-26950 |
+| **Vacuum deletes a rolled-back UPDATE's old chains** | The forward-walk acts on undo-image content with no commit/abort filter (`vacuum_process_log_record` gates only dropped files and rcvindex); rollback restores the pre-image whose stubs still reference the old chains, the aborted MVCCID retires normally, and the forward-walk then deletes the live row's chains. Analysis-based (no runtime repro); needs no block retry — single normal vacuum run suffices. Not preventable by the CBRD-26950 stamp (undo image and live stub carry the same (head OID, identity stamp)) | **Data loss (merge gate).** Fixed by CBRD-27230's commit-conditional notify emission (forward-walk removed) | CBRD-27237 |
 | ~~TDE not applied to OOS pages~~ | **DONE on `feat/oos`**: CBRD-26830 / commit `138f624964` added both defenses: `xfile_apply_tde_to_class_files` includes an existing OOS file, and lazy creation applies the class TDE algorithm before publishing the OOS VFID | Fixed 2026-06-16 | CBRD-26830 |
 | ~~OOS inline-stub writer bounds-checked the wrong pointer~~ | **DONE on `feat/oos`**: CBRD-26814 / commit `bceac0ddc` checks the actual stub write position `*ptr_varvals`, restoring the `S_DOESNT_FIT` grow-and-retry path. BLOB/CLOB locators remain OOS-demotable per ADR-0002 | Fixed 2026-07-03 | CBRD-26814 |
 | unloaddb 1.6-1.7x slower | `heap_attrinfo_start` called per `heap_next` in `feat/oos` branch | Performance regression | CBRD-26458 |
@@ -486,7 +495,7 @@ DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it 
 - **Pattern**: `CAST(REPEAT('AA', N) AS BIT VARYING)` produces N bytes on disk.
 - **Size verification**: Use `DISK_SIZE(col)` (not `LENGTH` which returns bits).
 - **Distinct values**: Use different hex patterns ('AA', 'BB', 'CC', etc.) to distinguish values.
-- **OOS trigger**: record > the PG-style four-record heap target (4,060B with the current 16KB I/O page layout); then the *largest* variable values (size strictly greater than 16B) are demoted one-by-one until the record reaches the target or candidates are exhausted — **not** every eligible value. The target excludes heap unfill, matching PG's separation of TOAST threshold and fillfactor.
+- **OOS trigger**: record > the PG-style four-record heap target (4,060B with the current 16KB I/O page layout); then the *largest* variable values (size strictly greater than 24B) are demoted one-by-one until the record reaches the target or candidates are exhausted — **not** every eligible value. The target excludes heap unfill, matching PG's separation of TOAST threshold and fillfactor.
 
 ### Common Table Setup
 
@@ -545,7 +554,7 @@ CREATE TABLE oos_test (
 
 #### 9. Edge Cases (6 tests)
 - **9.1 Record gate boundary**: Verify the derived target and both sides of the boundary; with the current layout, 4,060B does not trigger and the next representable aligned size does
-- **9.2 Column eligibility floor**: Variable value ≤ 16B (`OR_OOS_INLINE_SIZE`) is never demoted, even when the record exceeds the target (demoting it would not shrink the record)
+- **9.2 Column eligibility floor**: Variable value ≤ 24B (`OR_OOS_INLINE_SIZE`) is never demoted, even when the record exceeds the target (demoting it would not shrink the record)
 - **9.3 NULL values**: NULL in OOS-eligible column
 - **9.4 Empty values**: Zero-length VARBIT in OOS-eligible column
 - **9.5 Many OOS-backed attributes**: 10+ attributes demoted in a single heap record
@@ -598,11 +607,11 @@ SELECT (vc1 = CAST(REPEAT('AA', 3000) AS BIT VARYING)) FROM t WHERE id = 1;
 When writing OOS-related code comments or documentation:
 
 - Use **OOS OID** only for the 8-byte physical OID of a chunk record; use **head OOS OID** when emphasizing the OID stored in the heap record
-- Use **OOS inline stub** for the 16-byte heap representation (head OOS OID + full length); never call the full stub an OOS OID or pointer
+- Use **OOS inline stub** for the 24-byte heap representation (head OOS OID + full length + identity stamp); never call the full stub an OOS OID or pointer
 - Use **OOS value** for the complete serialized attribute value, **OOS chunk record** for one physical slotted-page record, and **OOS value chain** for the complete one-or-more-chunk storage object
 - Use **OOS-backed attribute** for a particular row value; a schema column is merely eligible and its values may remain inline
 - Use **OOS file** / **OOS value** / **OOS chunk record** when referring to a concrete object; use **OOS subsystem** for the feature as a whole
 - Always add a space between inline code and Korean text: `` `oos_read` 는 `` (not `` `oos_read`는 ``)
-- Describe the record demotion gate as the **PG-style four-record heap target** derived by `heap_oos_inline_target_size()`; do not call it raw `DB_PAGESIZE/4`. State that it excludes heap unfill, like PG TOAST excludes fillfactor. The profitable demotion threshold remains `> OR_OOS_INLINE_SIZE` (strictly greater than 16B); `DB_PAGESIZE/8` / 512B are historical pre-CBRD-26776 values
+- Describe the record demotion gate as the **PG-style four-record heap target** derived by `heap_oos_inline_target_size()`; do not call it raw `DB_PAGESIZE/4`. State that it excludes heap unfill, like PG TOAST excludes fillfactor. The profitable demotion threshold remains `> OR_OOS_INLINE_SIZE` (strictly greater than 24B); `DB_PAGESIZE/8` / 512B are historical pre-CBRD-26776 values
 - State ownership as: each OOS value chain is owned by exactly one logical heap-record version; value chains are not shared across versions
 - Do not describe unimplemented features as existing (no PEEK mode, no OOS dedup, no across-page compaction in M1)
