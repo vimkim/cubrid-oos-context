@@ -4,6 +4,8 @@ status: accepted
 
 # Preserve OOS historical values in supplemental images
 
+> **Partially superseded by [ADR-0005](0005-defer-oos-history-from-the-11-5-merge.md) on 2026-09-22.** The durable-image analysis remains a candidate direction and useful evidence, but CBRD-26939 is deferred from PR #7990 and the 11.5 OOS merge. The activation and compatibility contract below is no longer accepted for that merge and must be redesigned before implementation.
+
 Accepted with the user on 2026-09-08 for CBRD-26939. CDC and flashback must reconstruct supported before/after images after vacuum has reclaimed the corresponding OOS value chains. Store complete expanded images in supplemental WAL when the image contains OOS-backed attributes, while preserving ordinary recovery logging and normal OOS reclamation. This accepts additional serialization and WAL volume when supplemental logging is enabled in exchange for keeping historical readers independent of OOS chain lifetime.
 
 ## Historical compatibility
@@ -32,6 +34,6 @@ Retaining OOS chains for historical readers would require a durable retention ho
 
 Keep `bug_bts_4633` as a separate diagnosis within the overall PR #6864 success objective. Its observed MVCC undo-read crash is not attributed to CDC by this decision. Retain `cbrd_27075` as CDC regression coverage alongside the currently failing `cbrd_27064`.
 
-This ADR records accepted behavior, not a completed implementation or final specification. The decision frontier is closed after Q1–Q9; the user confirmed proceeding with the accepted contract on 2026-09-08. Encoding, publication ordering, compatibility enforcement details, and verification belong in the implementation specification.
+This ADR records the direction accepted on 2026-09-08, not a completed implementation or final specification. ADR-0005 later deferred the whole change and reopened its compatibility/activation design. Encoding, publication ordering, compatibility enforcement details, and verification therefore remain future design work.
 
 Evidence: [diagnosis and experiments](../../../my-cubrid-docs/cbrd-26939/2940b1c_codex/diagnosis-and-design.md), engine `2940b1cfbc3c2d4d0fac3f9244a960350debd380`. The reduced DELETE workload fails with vacuum enabled, passes with vacuum disabled, and fails after vacuum is restored.
