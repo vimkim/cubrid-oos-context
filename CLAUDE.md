@@ -1,37 +1,33 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Repository Purpose
 
-## What This Repository Is
+This documentation repository is the authoritative agent context for CUBRID OOS (Out-of-row Overflow Storage). [OOS-CONTEXT.md](OOS-CONTEXT.md) holds all normative requirements. [CONTEXT.md](CONTEXT.md) defines CDC/flashback vocabulary; `docs/adr/` holds accepted decisions and rationale. Focused references hold dated implementation observations, history, and test recipes.
 
-This is **not** a code repository. It is the **single source of truth for AI agent context** about the CUBRID OOS (Out-of-row Overflow Storage) project.
+## Loading Context
 
-The sole artifact is `OOS-CONTEXT.md` — a curated, AI-optimized knowledge base compiled from multiple sources (vault docs, JIRA tickets, design discussions). It exists so that any Claude Code session working on CUBRID OOS can load comprehensive project context by reading one file.
+**Specification dependency:** consult the [cubrid-oos-context loader](/home/vimkim/.agents/skills/cubrid-oos-context/SKILL.md) when an answer depends on required behavior, accepted design, or implementation/test conformance. Use its load-or-reuse policy and `CUBRID_OOS_CONTEXT_FILE` override; it owns the detailed complete-read and fingerprint rules.
 
-## How It's Used
+Routine CI/PR status, scheduling, wording edits, and loader maintenance use their task evidence. When such a task expands into a behavioral question, apply the specification-dependency check to that question.
 
-The `/cubrid-oos-context` skill (defined in `~/.agents/skills/cubrid-oos-context/SKILL.md`) auto-triggers when OOS-related code or topics come up in a CUBRID worktree. That skill reads `OOS-CONTEXT.md` from this directory to prime the agent with architecture, CRUD flows, known bugs, test patterns, and design decisions.
+**CDC/flashback:** read [CONTEXT.md](CONTEXT.md) for historical-value terms and the specification's release-scope section for which ADR decisions apply.
 
-**This file is loaded at the start of OOS work sessions, not edited programmatically.** The user manually updates it when the OOS project evolves (new bugs found, features completed, design decisions made).
+**Implementation or progress:** read [implementation observations](docs/reference/implementation-observations.md), then verify the relevant revision/live state if the answer needs current facts.
 
-## Editing OOS-CONTEXT.md
+**Earlier decisions or proposals:** read [design history](docs/reference/design-history.md) and the relevant ADR.
 
-When updating this file:
+**Regression preparation:** read [test recipes](docs/reference/test-recipes.md) and derive expected behavior from the canonical specification.
 
-- Keep it **AI-optimized**: structured for fast comprehension, no web/HTML formatting, no Marp slide markers
-- **Update the "Last updated" date** in the header when making changes
-- Mark completed limitations/bugs with ~~strikethrough~~ and note the resolution (e.g., `**DONE** (CBRD-XXXXX)`)
-- Add new JIRA tickets to the Quick Reference table when they become relevant
-- Keep total size reasonable (~20-30KB) — this gets loaded into context every OOS session
-- The companion human-readable vault lives at `~/gh/cubrid-oos-vault/` but is NOT the source of truth for AI context
+## Maintaining the Documents
 
-## Source Material
+Authorized updates belong in this repository. Keep required behavior together in `OOS-CONTEXT.md`; move only non-normative evidence, history, recipes, or rationale behind explicit reading conditions. Aim for roughly 20–30 KB in the canonical file while retaining every requirement.
 
-OOS-CONTEXT.md was compiled from:
-- `~/gh/cubrid-oos-vault/content/CLAUDE.md` — core knowledge base
-- `~/gh/cubrid-oos-vault/AGENTS.md` — OOS architecture deep reference
-- `~/gh/cubrid-oos-vault/content/oos-todo.md` — bugs and optimization ideas
-- `~/gh/cubrid-oos-vault/content/OOS-Presentation.md` — design rationale, DB comparisons
-- `~/gh/cubrid-oos-vault/content/OOS-Test-Scenarios.md` — test patterns
+- Update `Last updated` for document modifications. Give implementation observations their own verification date and exact revision; a document edit does not refresh those facts.
+- Maintain one observation entry per issue in `docs/reference/implementation-observations.md`; link to it from other documents. Preserve earlier evidence dates/heads when recording a successor. Label missing dates or revisions explicitly.
+- Separate accepted requirements, implementation conformance gaps, proposals, and superseded history. Acceptance, a resolved ticket, and a passing experimental branch each establish different facts.
+- Apply each ADR's scope and supersession notice. Preserve decision history; documentation maintenance does not authorize new OOS design decisions.
+- Check local links, relocated relative links, and supporting evidence paths, then review the semantic diff and run `git diff --check`.
 
-These are reference material, not dependencies. OOS-CONTEXT.md is the living document.
+The human-readable `~/gh/cubrid-oos-vault/` is supporting material. Its original source list is retained in [design history](docs/reference/design-history.md#original-source-material).
+
+For review of the October 8 reorganization, read the [coverage and validation record](docs/maintenance/2026-10-08-context-review.md).

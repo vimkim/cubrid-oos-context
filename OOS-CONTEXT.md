@@ -1,235 +1,127 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
-> Normative specification and single source of truth for CUBRID OOS. The `feat/oos` branch is an incomplete implementation being brought into conformance before merge to `develop`.
-> Last updated: 2026-09-22 | Implementation branch: `feat/oos` | Milestone: M2 (the only active milestone — all remaining OOS work; M3 & M4 cancelled)
-> **Merge decision (2026-09-22, CBRD-26939):** Durable OOS history for CDC/flashback is deferred in full from PR #7990 and the CUBRID 11.5 OOS merge. Disk compatibility remains 11.5; no artificial 11.6 level or per-database activation state is introduced. Databases and logs produced by unreleased feature branches have no cross-revision compatibility guarantee and must be recreated when their format changes. The CDC cases `cbrd_27064` and `cbrd_27075` remain enabled and visibly failing until the follow-up work is redesigned. The durable-supplemental-image direction remains useful evidence, but encoding and compatibility/activation policy are reopened. See [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md).
-> **Identity layout reconciliation (2026-09-09, CBRD-26950):** The accepted PR #7695 design uses the pre-insert page LSA as an identity stamp. The OOS inline stub and chunk header are each 24 bytes; the stub contains the head OOS OID, full length, and packed head identity stamp (8 bytes each). This supersedes the former 16-byte layout and the rejected counter proposal. Verified implementation: PR head `eaf1165bb` over base `f4299ac0c`, with all six accepted review-repair slices done (stub field bounds, stale and retyped reference handling, eager cleanup diagnostics, the logging precondition, undo/redo identity preservation, and the verification pass); this is not a claim that the PR is merged. The accepted repair policy diagnoses skipped eager cleanup while completing DML, retains silent vacuum skips, and preserves no-logging bulk loads with the logging precondition stated below.
-> **Spec note (2026-08-28):** Empty-page reclaim (CBRD-26786) is accepted as an **invariant, not a best-effort optimization**: every fully emptied OOS data page is eventually returned to the file manager, and an OOS file reserves a new sector only when no safely reclaimable empty page exists right now. Three mechanisms deliver it — the vacuum fast path (batch reclaim API, two-phase check), the **LSA reclaim gate** (pages whose last writer may still be a live undo source are deferred), and the **growth-gate sweep** (a per-VFID pending-delete counter arms an incremental, cursor-resumed sector-bitmap sweep at the file's single growth point; a boot rule absorbs hint loss). Covers the SA/non-MVCC eager path. Implemented on PR #7617 (head `8ba9b5398`, includes reviewer fixes R3/R4/B1), **pending merge to `feat/oos`** — verify merge status before citing as implemented-on-feat/oos.
-> **Spec note (2026-07-13):** The fixed `DB_PAGESIZE/4` record gate is superseded by a PostgreSQL-style four-record physical-capacity target. The target subtracts heap-page fixed overhead and four slot entries, divides by four, and aligns down; like PostgreSQL TOAST, it does **not** include heap unfill/fillfactor policy. With the current 16KB I/O page layout the target is 4,060B. Tracked by CBRD-27057; see §1.
-> **Historical note (2026-06-18):** CBRD-26776 (PR #7158) introduced PG TOAST-style largest-first demotion, changed the then-current gate from 2KB to fixed 4KB, lowered the profitable demotion threshold to `> OR_OOS_INLINE_SIZE`, and stopped after reaching the target instead of externalizing every eligible value. The fixed 4KB gate is now superseded; largest-first ordering remains normative; CBRD-26950 updates the profitability floor to the accepted 24-byte stub size.
-> **Spec note (2026-09-22):** `STORAGE PREFER_INLINE` is accepted normative scope for the CUBRID 11.5 OOS merge. CBRD-26912 is Resolved/Fixed for target version `guava`; PR #7334 merged the implementation into `feat/oos` as commit `4523843d1` on 2026-06-29. The option is a soft demotion-priority hint: its values remain eligible for OOS but sort after ordinary candidates. This corrects the stale former label "proposed — NOT yet merged."
-> **Spec note (2026-08-13):** The M1 always-new-chain UPDATE rule and the vacuum forward-walk cleanup are superseded by the accepted **CBRD-27230** design: UPDATE reuses OOS value chains for attributes **not assigned** by the statement; dropped chains are announced via a **commit-conditional `RVOOS_NOTIFY_VACUUM` record** (emitted from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs) consumed by vacuum; the forward-walk is **removed**. DELETE (REMOVE path) and the SA_MODE eager path are unchanged. Replication gains a per-reused-attribute marker item + replica-side fixup (same spec). CBRD-26950 is a hard prerequisite (sole source of vacuum-retry idempotency). Not yet implemented. See §3 UPDATE for the superseding ownership invariant. Related bug filed from the same analysis: **CBRD-27237** (current forward-walk deletes a rolled-back UPDATE's old chains — fixed by this design's commit-conditional emission).
+> Normative specification and single source of truth for required CUBRID OOS behavior.
+> Last updated: 2026-10-08 (document modification only). Implementation observations carry their own evidence dates and revisions.
 
-> **CDC/flashback history (2026-09-08; deferred 2026-09-22):** ADR-0004 selected durable supplemental images for preserving OOS historical values, retaining ordinary recovery logging and normal reclamation. That direction remains design evidence for future CBRD-26939 work, but it is not part of PR #7990 or the 11.5 OOS merge. Its encoding and compatibility/activation design must be reconsidered under the 11.5 release model; see [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md) and its superseding scope decision, [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md).
+## Authority and reading paths
 
-### Requirement Status
+Requirements in this file are **normative** unless explicitly marked proposed, historical, or outside the stated release scope. An accepted design is a requirement, even when an observed implementation has a conformance gap. Source code establishes behavior at that revision; JIRA establishes ticket workflow state. Neither silently changes accepted requirements.
 
-- **Normative** (default): required OOS behavior. Implementation differences are conformance gaps.
-- **Proposed**: not accepted and not required.
-- **Implementation status — non-normative**: dated progress or temporary state on `feat/oos` or an experimental branch.
-- **Historical**: superseded behavior retained only for context.
+Keep all required behavior in this canonical file and read it completely when the [OOS context loader](/home/vimkim/.agents/skills/cubrid-oos-context/SKILL.md) selects a specification-dependent task. The loader owns file override, complete-read, fingerprint, and reuse policy. Follow these additional pointers only when their condition applies:
 
-### Current Implementation Status — Non-normative
+| Read when | Reference |
+|---|---|
+| Comparing an engine/PR with requirements, diagnosing an issue, or checking implementation progress | [Implementation observations](docs/reference/implementation-observations.md): one maintained entry per issue, with dated revision evidence; reverify before making a current-state claim |
+| Explaining a superseded rule, earlier milestone, alternative, or optimization proposal | [Design history](docs/reference/design-history.md): non-normative snapshots and proposals |
+| Preparing test data or choosing regression coverage | [Test recipes](docs/reference/test-recipes.md): examples and scenarios, with expectations derived from this specification |
+| Discussing CDC/flashback historical images | [Historical-value vocabulary](CONTEXT.md), [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md), and [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md); apply the release scope in §5 |
+| Needing rationale for page enumeration, LOB eligibility, or Expand | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), or [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), respectively |
 
-- `feat/oos` is incomplete and is expected to converge on this specification before merge to `develop`.
-- CBRD-27057 replaces the raw `DB_PAGESIZE/4` gate. Draft PR #7462 implements the 4,060B physical target for both the trigger and demotion stop, excludes `PRM_ID_HF_UNFILL_FACTOR`, and adds target/boundary/unfill-independence coverage. As of PR #7990 head `7008beee0` on 2026-09-22, that implementation is not integrated: `feature/oos-merge` still uses raw `DB_PAGESIZE/4`. JIRA is Resolved/Fixed despite PR #7462 remaining open and dirty; reconcile workflow status before calling it merged.
-- Temporary crash-on-invariant instrumentation marked `REVERT BEFORE MERGE` remains in `heap_file.c` and `vacuum.c`. It is a merge-readiness item, not required OOS behavior.
-- Experimental-branch implementations do not become normative or implemented-on-`feat/oos` merely because they are described here; verify their merge status explicitly.
-
-## Quick Reference
-
-| Concept | Detail |
-|---------|--------|
-| OOS trigger | record > the PostgreSQL-style four-record heap target (`heap_oos_inline_target_size()`; 4,060B with the current 16KB I/O page layout) → demote largest variable values (value strictly greater than `OR_OOS_INLINE_SIZE` = 24B) one-by-one until the record reaches the target or candidates are exhausted. The target accounts for physical heap-page/slot overhead but intentionally excludes heap unfill, matching PostgreSQL's separation of TOAST threshold and fillfactor. Type-agnostic — BLOB/CLOB locators demote like any variable value (ADR-0002) |
-| OOS file type | `FILE_OOS`, lazily created; at most one per heap file |
-| OOS inline stub | 24-byte inline reference: head OOS OID (8B) + full length (8B) + packed identity stamp (8B) |
-| HAS_OOS flag | MVCC header bit 3 (`OR_MVCC_FLAG_HAS_OOS = 0x08`) |
-| IS_OOS flag | VOT entry bit 0 (`OR_VAR_BIT_OOS = 0x1`) |
-| Key sources | `heap_file.c`, `oos_file.cpp`, `object_representation.h`, `object_representation_constants.h` |
-| Branch | `feat/oos` |
-| JIRA | CBRD-26517 (main), CBRD-26458 (unloaddb perf), CBRD-26516 (redundant oos_read), CBRD-26637 (error handling), CBRD-26658 (3-tier bestspace), CBRD-26668 (vacuum integration, done), CBRD-26776 (largest-first demotion, done), CBRD-26786 (empty-page reclaim invariant — implemented on PR #7617, pending merge), CBRD-27057 (four-record physical target), CBRD-26937 (OOS+bigone rejection), CBRD-26950 (vacuum slot-reuse data loss — CRITICAL, fix design locked), CBRD-26830 (TDE plaintext leak — security), CBRD-26912 (`STORAGE PREFER_INLINE`, accepted and implemented), CBRD-27230 (UPDATE chain reuse + notify-log cleanup — accepted design), CBRD-27237 (forward-walk rollback data loss — fixed by CBRD-27230 design) |
+The reference documents contain evidence and rationale. They do not add hidden requirements or replace a complete read of this file. Historical text in a linked report is interpreted under the accepted requirements here.
 
 ### Core Terminology
 
 | Term | Definition |
-|------|-----------|
-| OOS-backed attribute | An attribute value whose heap representation is an OOS inline stub |
-| OOS value | The complete serialized attribute value, excluding OOS record headers |
-| OOS File | `FILE_OOS` type file; at most one per heap file |
-| OOS Page | Slotted page within OOS file (size = DB_PAGESIZE) |
-| OOS chunk record | One physical slotted-page record containing an OOS record header and a payload fragment |
-| OOS value chain | One or more OOS chunk records containing one complete OOS value |
-| OOS OID | The 8-byte physical `OID` of one OOS chunk record (volid 2B + pageid 4B + slotid 2B) |
-| Head OOS OID | The OOS OID stored in an inline stub; identifies chunk index 0 of the value chain |
-| Next-chunk OID | The OOS OID in an OOS record header that links to the following chunk record |
-| OOS inline stub | The 24-byte heap representation of an OOS-backed attribute: head OOS OID (8B) + full length (8B) + packed identity stamp (8B) |
-| Full length | Total serialized OOS value length across all chunks, excluding OOS record headers |
-| HAS_OOS flag | Record-level MVCC header flag — true iff the heap record contains at least one OOS inline stub |
-| IS_OOS flag | Per-attribute VOT flag — true iff this variable-area entry contains an OOS inline stub instead of an inline value |
-| OOS Expand | **Record-level, eager**: replace every OOS inline stub with its value, rebuilding the whole record (`HEAP_GET_CONTEXT.expand_oos` → `heap_record_replace_oos_oids`). For callers that consume raw recdes bytes. _Avoid_: "resolve" for this. |
-| OOS Resolve | **Attribute-level, lazy**: obtain one OOS-backed attribute's logical value on demand (`heap_attrvalue_read_oos_inline` → `oos_read`). _Avoid_: "expand" for this. |
-| OOS Read | **Storage-level**: `oos_read` follows one OOS value chain from its head OOS OID and reconstructs the complete OOS value. Do not use as a synonym for attribute-layer Resolve. |
-| OOS inline target | Maximum aligned heap recdes length for which four records plus four slot entries physically fit on a non-header heap page. It is derived from `heap_nonheader_page_capacity()` and intentionally excludes heap unfill, like PostgreSQL `MaximumBytesPerTuple(4)` excludes relation fillfactor. |
-| OOS Demotion | **Write-time, trigger-side**: at INSERT/UPDATE, when the record exceeds the OOS inline target, move the *largest* eligible variable values to OOS one-by-one until the record reaches that target or candidates are exhausted — PG TOAST-style (`heap_attrinfo_determine_disk_layout`, CBRD-26776). Not every eligible value is externalized; smaller ones may stay inline. _Avoid_: "bulk externalization" (that was the old M1 behavior). |
-| Numerable file | A file that records page-allocation order so callers can fetch the nth page (`file_numerable_find_nth`). OOS was created numerable through `4ddbc7c`; the ADR-0001 non-numerable migration is implemented on `oos-m2-all-plans-experimental` (2026-07-02, pending verification/merge). _Avoid_: indexed file, ordered file |
-| Bestspace sync | Tier-3 fallback that walks OOS data pages once to recharge free-space hints when the cache and best[] both miss. _Avoid_: full scan, refill |
-| Sector-bitmap walk | Enumerating a file's data pages from its partial/full sector bitmap (`file_get_all_data_sectors`) instead of a page chain or page numbering — the planned OOS enumeration (ADR-0001). _Avoid_: data-sector scan |
-| Mark-delete | A numerable-file dealloc that flags a user-page-table slot as deleted instead of removing it; `find_nth` then skips it. Accumulation drives `find_nth` into an O(n) per-call slow path |
-| Pending-delete counter (미회수 삭제 카운터) | Per-VFID in-memory hint (`{pending_deletes, swept_this_boot, sweep_cursor}` side map, non-evicting, bestspace mutex) counting OOS value chain deletes not yet accounted for by a completed sweep lap. Arms the growth gate; only the zero/non-zero verdict matters. Loss (crash/restart) costs one boot-rule lap, never a page — the truth is on disk (sector bitmap + page emptiness) |
-| Growth-gate sweep (성장 게이트 sweep) | The reclaim guarantee's backstop: at an OOS file's single growth point (`oos_alloc_page_with_reclaim`), when deletes are pending (or the boot rule applies), walk the sector-bitmap snapshot from the saved cursor and stop at the first reclaimed page, which the fall-through `file_alloc` immediately reuses. A lap that reclaims nothing settles the counter; deferred pages keep it armed but growth proceeds. _Avoid_: full sweep (that is exactly what the cursor avoids) |
-| LSA reclaim gate (LSA 게이트) | Per reclaim call, sample horizon = min head LSA over active regular transactions and active system tdes (clamped to the pre-scan append LSA); deallocate an empty page only when its page LSA is older — otherwise classify **deferred** (a still-active deleter's abort would replay chunk deletes into the page). Deferral is bounded: the page becomes reclaimable once the writer finishes |
+|---|---|
+| OOS-backed attribute | A row value represented by an inline stub; a schema column is only eligible |
+| OOS value | Complete serialized attribute bytes, excluding chunk headers |
+| OOS file / page | `FILE_OOS`; slotted data pages of `DB_PAGESIZE`; at most one file per heap |
+| OOS chunk record | One slotted-page record: OOS header plus a payload fragment |
+| OOS value chain | One or more chunk records holding one complete value |
+| OOS OID | Physical 8B chunk OID: volid 2B, pageid 4B, slotid 2B |
+| Head OOS OID | Stub's OID of chunk index 0 |
+| Next-chunk OID | Header link to the following chunk |
+| OOS inline stub | 24B: head OID 8B, full length 8B, packed head identity stamp 8B |
+| Full length | Total serialized value length, excluding all chunk headers |
+| HAS_OOS / IS_OOS | Record MVCC flag / attribute VOT flag; true iff the record contains a stub / this entry is a stub |
+| OOS Expand | Record-level, eager replacement of every stub; `HEAP_GET_CONTEXT.expand_oos` → `heap_record_replace_oos_oids` |
+| OOS Resolve | Attribute-level, lazy value retrieval; `heap_attrvalue_read_oos_inline` → `oos_read` |
+| OOS Read | Storage-level `oos_read` reconstructs one chain; distinct from Resolve |
+| OOS inline target | Aligned physical four-record heap-capacity target, independent of unfill (§1) |
+| OOS Demotion | INSERT/UPDATE moves largest eligible values until the target or candidate exhaustion (§1) |
+| Numerable file | Tracks allocation order for nth-page access (`file_numerable_find_nth`) |
+| Bestspace sync | Tier-3 page sampling recharges hints after cache/best[] misses (§2) |
+| Sector-bitmap walk | Enumerates partial/full bitmap data pages (`file_get_all_data_sectors`) rather than nth-page order |
+| Mark-delete | Numerable deallocation flags a page-table entry; skipping accumulated entries makes `find_nth` O(n) per call |
+| Pending-delete counter (미회수 삭제 카운터) | Per-VFID zero/non-zero growth-gate hint; full accounting/boot contract in §4 |
+| Growth-gate sweep (성장 게이트 sweep) | Incremental cursor-resumed bitmap reclaim at the single growth point (§4) |
+| LSA reclaim gate (LSA 게이트) | Defers empty pages that may still be undo destinations; horizon contract in §4 |
 
 ---
 
 ## 1. What is OOS?
 
-**OOS (Out-of-row Overflow Storage)** separates large variable-length columns from heap records into dedicated OOS files to reduce unnecessary disk I/O. Instead of reading a full 3KB record for a 4-byte ID, only small columns are read from the heap.
-
-```
-AS-IS:
-[ id | name | big_text (4.5KB) | big_blob (4.5KB) ]  <- entire heap record (~9KB > 4KB)
-
-TO-BE:
-[ id | name | OOS inline stub (24B) | OOS inline stub (24B) ] <- compact heap record
-                  |                |
-                  v                v
-           [ big_text ]     [ big_blob ]             <- OOS file (separate)
-```
+OOS separates large variable-length attribute values from heap records into a dedicated file. The compact heap record holds inline stubs; access to small attributes avoids reading large values. A heap file has at most one lazily created `FILE_OOS` file.
 
 ### Trigger Conditions — Largest-First Demotion (CBRD-26776; physical target CBRD-27057)
 
-OOS demotion is a two-stage, **incremental** process (`heap_attrinfo_determine_disk_layout`, `heap_file.c`). It mirrors PostgreSQL's tuple-toaster main loop, minus compression:
+At INSERT/UPDATE, `heap_attrinfo_determine_disk_layout` applies an incremental demotion policy:
 
-1. **Record gate**: only externalize if `header_size + payload_size + mvcc_extra > heap_oos_inline_target_size()`. The same target is used for loop termination. With the current 16KB I/O page layout it is 4,060B. CUBRID's `DB_PAGESIZE` is 16,344B after the 40B file-I/O reservation, so neither the I/O-page quarter (4,096B) nor `DB_PAGESIZE/4` (4,086B) is the correct physical target.
-2. **Eligibility**: an attribute value is a candidate iff `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than 24B) — i.e. its value is bigger than the 24-byte OOS inline stub (head OOS OID + full length + identity stamp) that replaces it, so demoting it actually shrinks the record. The rule is **type-agnostic**: BLOB/CLOB values are eligible too (ADR-0002) — the in-row value is the ELO locator string, and only those locator bytes go to OOS (the LOB payload stays in external LOB storage). LOB copy semantics are preserved on the OOS path: `heap_attrinfo_dbvalue_to_recdes` performs the same `db_elo_copy_with_prefix` step as the inline writer before serializing.
-3. **Largest-first loop**: sort candidates by size **descending**, then demote one at a time (subtracting `column_size`, adding back 24B per demote), and **`break` as soon as the record drops to ≤ the OOS inline target**. If candidates are exhausted first, the record may remain above the target; possible values stay OOS-backed and the later OOS+bigone guard either accepts the record as an ordinary slotted-page record or rejects it if it would require `REC_BIGONE`. If there are no eligible values, `has_oos` remains false and an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid.
+1. **Record gate:** demote only when `header_size + payload_size + mvcc_extra > heap_oos_inline_target_size()`. Use the same target for the trigger and stop.
+2. **Eligibility:** `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than **24B**). Demotion must shrink the value's representation. This is type-agnostic, including BLOB/CLOB **locator bytes**; the external LOB payload stays in the LOB subsystem. The OOS serialization path preserves inline-path `db_elo_copy_with_prefix` semantics before writing the locator (ADR-0002).
+3. **Order and stop:** consider ordinary candidates before `STORAGE PREFER_INLINE` candidates (§ below); within each group sort by size descending. Demote one at a time, subtracting `column_size` and adding 24B. Stop when the record is at or below the target or candidates are exhausted. Smaller eligible values may remain inline.
+4. **Exhausted candidates:** a record may remain above the target. Keep selected values OOS-backed and apply the OOS+bigone guard below. With no candidates and no retained stubs, `has_oos` stays false; an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid.
 
-The target follows PostgreSQL's `MaximumBytesPerTuple(4)` policy:
+The PostgreSQL-style four-record physical-capacity target is:
 
 ```text
 records_per_page = 4
 page_capacity = heap_nonheader_page_capacity()
-
 oos_inline_target = ALIGN_BELOW(
-  (page_capacity - records_per_page * SPAGE_SLOT_SIZE)
-    / records_per_page,
+  (page_capacity - records_per_page * SPAGE_SLOT_SIZE) / records_per_page,
   HEAP_MAX_ALIGN)
 ```
 
-`heap_nonheader_page_capacity()` already excludes the slotted-page header, the heap chain record, and its slot. The formula then reserves four user-record slots before dividing. It intentionally does **not** subtract `heap_hdr->unfill_space`: PostgreSQL's TOAST threshold likewise does not include relation fillfactor; fillfactor/unfill remains an independent page-selection policy.
+`heap_nonheader_page_capacity()` excludes the slotted-page header, heap chain record, and its slot. Reserve four user-record slots before dividing, then align down. Exclude `heap_hdr->unfill_space`: this physical target is independent of heap unfill, just as PostgreSQL `MaximumBytesPerTuple(4)` excludes relation fillfactor. Page selection still obeys configured unfill; the formula is not a promise to pack four records on every page.
 
-With the current 16KB layout:
+Current 16KB I/O layout:
 
 ```text
-IO_PAGESIZE                          16,384
-DB_PAGESIZE                          16,344
-heap_nonheader_page_capacity()       16,268
-four user SPAGE_SLOT entries             16
-(16,268 - 16) / 4                    4,063
-ALIGN_BELOW(4,063, 4)                4,060
+IO_PAGESIZE                     16,384B
+DB_PAGESIZE                     16,344B (40B file-I/O reservation)
+heap_nonheader_page_capacity()  16,268B
+four user slots                     16B
+(16,268 - 16) / 4 = 4,063B; ALIGN_BELOW(4,063, 4) = 4,060B
 ```
 
-Therefore four target-sized recdes plus their slots physically fit (`4 × (4,060 + 4) = 16,256 ≤ 16,268`), while the next aligned record size does not (`4 × (4,064 + 4) = 16,272 > 16,268`). This is a physical-capacity invariant, not a promise that heap bestspace will ignore configured unfill and actually pack four records on every page.
+Four target-sized records fit: `4 × (4,060 + 4) = 16,256 ≤ 16,268`. The next aligned size does not: `4 × (4,064 + 4) = 16,272 > 16,268`. Neither the I/O-page quarter (4,096B) nor raw `DB_PAGESIZE/4` (4,086B) is the accepted target.
 
-```
-record > oos_inline_target ?
- ├─ no  → all values inline (no OOS)
- └─ yes → candidates = variable values with size > 24B, sorted by size DESC
-           for cand in candidates:
-             record already ≤ oos_inline_target ?  → break
-             demote cand to OOS; payload -= cand_size; payload += 24B
-           candidates exhausted above target? → apply OOS+bigone rejection rule
-```
-
-Example with the current 16KB layout (target = 4,060B):
-- Record ~2.3KB ≤ 4,060B → OOS not triggered (under the old M1 rule this *would* have triggered at the 2KB gate)
-- Record ~5KB (vc1=3000B + vc2=2000B) → demote largest (vc1) → record ~2KB ≤ 4,060B → **break**. Only vc1 goes to OOS; vc2 stays inline.
-- Record ~9KB (vc1=4500B + vc2=4500B) → demote vc1 → ~4.5KB still > 4,060B → demote vc2 → fits. Both go to OOS.
-
-**Conservative estimate (always safe)**: the loop compares against the pre-loop `header_size`, which is recomputed only once *after* the loop. Because payload is monotonically decreasing and header is monotonically non-increasing, the in-loop value is an over-estimate — so the loop may **over-demote** by at most one value near a VOT offset-size boundary (BYTE↔SHORT↔INT), but can never **under-demote** relative to that estimate. Afterward, the OOS+bigone guard ensures the result is either a valid slotted-page record or a rejected write.
-
-**Old M1 behavior (for contrast)**: a single gate at `DB_PAGESIZE/8` (2KB), then *every* variable column `> 512B` was bulk-externalized in one pass — no sorting, no early stop. Replaced by CBRD-26776 (merged, PR #7158).
+**Conservative estimate:** compare using pre-loop `header_size`, recomputed once after demotion. Payload decreases and the header cannot grow, so this is an overestimate: at a VOT BYTE↔SHORT↔INT boundary the loop may over-demote by at most one value, but cannot under-demote relative to that estimate. The final guard still requires a valid slotted-page record or rejection. Worked examples are in [test recipes](docs/reference/test-recipes.md#demotion-worked-examples); former gate/floor values are in [history](docs/reference/design-history.md#supersession-timeline).
 
 ### Per-column inline preference (CBRD-26912)
 
-`STORAGE PREFER_INLINE` is an accepted soft column hint, analogous to PostgreSQL `SET STORAGE MAIN`. It pushes the
-column to the back of the largest-first demotion order, so ordinary candidates are externalized first. The value
-remains eligible and is still demoted as a last resort when the record otherwise cannot reach the OOS inline target.
-Afterward, the ordinary OOS+bigone guard still guarantees either a valid slotted-page record or a rejected write.
-The setting is stored in `SM_ATTFLAG_OOS_PREFER_INLINE`; its sole storage-policy effect is the primary sort key in
-`heap_attrinfo_determine_disk_layout`.
+`STORAGE PREFER_INLINE` is an accepted soft hint for the CUBRID 11.5 OOS merge. Its values remain eligible but sort after ordinary candidates, descending by size within each group; demote them as a last resort when necessary. Store the setting in `SM_ATTFLAG_OOS_PREFER_INLINE`; its sole storage-policy effect is the primary sort key in `heap_attrinfo_determine_disk_layout`. Apply the ordinary OOS+bigone guard afterward.
 
 ### OOS + bigone Rejection (CBRD-26937)
 
-Demotion only moves *variable* attributes, so a record can still exceed the bigone threshold after every eligible value is demoted — e.g. a huge fixed-length `BIT(n)`/`CHAR` attribute, or many `≤24B` variable values. A record that contains OOS inline stubs **and** would be stored as a `REC_BIGONE` overflow record is an unsupported combination. `heap_attrinfo_transform_to_disk_internal` rejects it — *after* demotion, *before* writing any OOS value chain — with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375):
+OOS stubs combined with `REC_BIGONE` overflow are unsupported. Large fixed `BIT(n)`/`CHAR` or many ≤24B variable values may keep a demoted record above the bigone threshold. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
 
-```
-if (has_oos && heap_is_big_length (expected_size))   // expected_size = record size after demotion
-    → er_set (ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE); return S_ERROR;
+```text
+if (has_oos && heap_is_big_length(expected_size))
+  er_set(ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE); return S_ERROR;
 ```
 
-- Rejection threshold is `heap_Maxslotted_reclength` (~16KB, the bigone threshold), **not** the OOS inline target. An OOS-backed heap record left between the target and ~16KB because candidates were exhausted is valid.
-- Only fires when `has_oos` is true; ordinary non-OOS bigone records are unaffected.
-- Gate sits before `heap_attrinfo_insert_to_oos`, so no orphan OOS value chains are written on rejection.
+The error is `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375). The rejection boundary is `heap_Maxslotted_reclength` (~16KB), not the OOS inline target. OOS-backed records between the target and that boundary are valid when candidates run out. Non-OOS bigone records are unaffected. Running the gate before `heap_attrinfo_insert_to_oos` avoids orphan chains on rejection.
 
 ---
 
 ## 2. Architecture & Design
 
-### CUBRID Storage Context
-
-- **Heap file**: One per table. Contains slotted pages. Each page holds multiple records via a slot directory.
-- **Overflow page**: When a single record exceeds one page, CUBRID chains overflow pages. OOS addresses the variable-column dimension specifically.
-- **MVCC (Multi-Version Concurrency Control)**: In-place MVCC — records carry insert/delete transaction IDs in their MVCC header.
-- **WAL (Write-Ahead Logging)**: All modifications logged before being applied to pages.
-- **Vacuum**: Background process that reclaims space from records no longer visible to any active transaction.
-
-### Comparison with Other Databases
-
-| | PostgreSQL (TOAST) | MySQL (Off-page) | CUBRID OOS (current) |
-|---|---|---|---|
-| **Trigger** | `MaximumBytesPerTuple(4)` (~2KB), independent of fillfactor | ~8KB (row) | PG-style four-record heap target (4,060B with current 16KB I/O page layout), independent of unfill; value > 24B |
-| **Stop semantics** | Largest-first, stop when row fits | Largest-first | **Largest-first, stop when record fits (CBRD-26776)** |
-| **Separation** | Column-level | Column-level | Column-level |
-| **Inline reference size** | 18B | 20B | **24B** (OOS inline stub) |
-| **Compression** | pglz / lz4 | COMPRESSED format | None — deferred to future; CTO leans type-layer (`mr_data_writeval`), not OOS-layer (see Design Discussions) |
-| **Storage** | TOAST table | Overflow pages | OOS file (FILE_OOS) |
-| **Chunk split** | ~2KB chunks | Page-unit chain | OOS page-unit chain |
-| **UPDATE reuse** | Unchanged values keep inline reference | Unchanged values keep inline reference | Always new value chain/head OID (M1) |
-
-### Why This Design?
-
-OOS is an evolution of CUBRID's existing Overflow Page mechanism:
-
-| | Overflow (AS-IS) | OOS (TO-BE) |
-|---|---|---|
-| Separation unit | Entire record | Per-column |
-| Page structure | Dedicated overflow page (1 record/page) | **Slotted page** (multiple records/page) |
-| Internal fragmentation | Large | Reduced |
-| File mapping | 1 heap file : 1 overflow file | 1 heap file : at most 1 OOS file |
-
-**Why slotted pages**: Multiple OOS chunk records per page reduce internal fragmentation. The tradeoff is potential page lock contention when different transactions modify chunk records on the same page.
-
-**Design decision**: Uses low-level heap/slotted page APIs the team knows well. References existing Overflow file implementation patterns. The CUBRID team chose this over PostgreSQL-style TOAST tables (which would require multi-table transaction sync) or simple overflow page modification (which wouldn't help with network/replication layers).
+An OOS file uses slotted pages so multiple chunk records can share a page. Values larger than one page form chains; file/page hints and identity checks serve different roles.
 
 ### Record Binary Layout
 
+```text
+Heap record: MVCC header | variable offset table (VOT) | fixed columns | variable area
+VOT entry: offset_value (30 bits) | RESERVED (1 bit) | IS_OOS (1 bit)
+  OR_VAR_BIT_OOS = 0x1: set -> 24B stub at the offset; clear -> inline value
+Stub: head OOS OID (8B) | full length (8B bigint) | identity stamp (8B packed LSA)
+  OR_OOS_INLINE_SIZE = 24
+MVCC flags: bit 0 insert ID; bit 1 delete ID; bit 2 prev-version LSA;
+  bit 3 HAS_OOS (OR_MVCC_FLAG_HAS_OOS = 0x08); bit 4 reserved
 ```
-Heap Record (on disk):
-+------------------+------------------+-------+--------------------------------+
-|  MVCC Header     |  Variable Offset |  Fixed|  Variable Area                 |
-|  (flags+txn ids) |  Table (VOT)     |  Cols |  (inline values or OOS stubs)   |
-+------------------+------------------+-------+--------------------------------+
 
-VOT Entry (per variable column):
-  [offset_value (30 bits) | RESERVED (1 bit) | IS_OOS (1 bit)]
-
-  IS_OOS = 1  ->  variable area contains an OOS inline stub (24 bytes) at this offset
-  IS_OOS = 0  ->  variable area contains actual value at this offset
-
-OOS inline stub (OR_OOS_INLINE_SIZE = 24 bytes):
-  [head OOS OID (8B) | full length (8B bigint) | identity stamp (8B packed LSA)]
-
-MVCC Header Flags (5 bits total):
-  bit 0: has insert ID
-  bit 1: has delete ID
-  bit 2: has prev version LSA
-  bit 3: HAS_OOS (new for OOS)
-  bit 4: reserved
-
-  WARNING: MVCC header size lookup uses only lower 3 bits (idx & 0x07)
-  HAS_OOS (bit 3) does NOT affect header size -- it's metadata only.
-```
+MVCC header-size lookup uses only the lower three bits (`idx & 0x07`); HAS_OOS is metadata and does not change header size.
 
 ### Multi-Chunk OOS Chain
 
@@ -247,46 +139,43 @@ Read order (forward):
   Follow chain: chunk_0 -> chunk_1 -> chunk_2 -> reassemble value
 
 Each OOS chunk record (24-byte header followed by payload):
-+-------------------+-------------+------------------+----------------+------------------+
-| total_data_length | chunk_index | next-chunk OID   | identity_stamp | payload fragment |
-| 4B                | 4B          | 8B; NULL last    | 8B LOG_LSA     | variable length  |
-+-------------------+-------------+------------------+----------------+------------------+
+  total_data_length (4B) | chunk_index (4B) | next-chunk OID (8B; NULL last)
+  identity_stamp (8B LOG_LSA) | payload fragment (variable length)
 
 total_data_length is the complete OOS value length and excludes every OOS record header.
 ```
 
-Reverse insertion reason: when inserting earlier chunks, the next chunk's OID must already be known.
+Each chunk stores the page LSA captured under its write latch before that insert is logged. Stamps are per chunk, not chain-wide; the stub stores only the head's stamp. Insert redo/delete undo restore the stored stamp from the logged image. Pack the stub stamp into one bigint; the header stores raw `LOG_LSA`. Recreate test databases built with older unreleased layouts and use matching install artifacts.
 
-Each chunk stores the page LSA captured under its write latch before its insert is logged. The stub stores only the head chunk's stamp; stamps are not chain-wide. Insert redo and delete undo restore the stored stamp from the logged chunk image. The inline representation packs the stamp into one bigint, while the chunk header stores raw `LOG_LSA`. Existing test databases and install artifacts must match this unreleased layout; recreate databases built with the older layout.
+**Accepted identity checks (CBRD-26950):** validate the expected head stamp before returning payload or deleting a chain. Under the head latch, tolerate deallocated/retyped pages and missing/reused slots without interpreting another page type as a slotted page. Reads reject stale references with `ER_HEAP_OOS_CORRUPTED_RECORD`, rather than returning another occupant's bytes. Deletion compares identity under the same write latch that deletes the head; an absent/reused head is a clean no-op. Matching malformed/non-head references and operational failures are errors. Stub parsing, extraction, and replica fixup respect the VOT-defined field width before reading/writing the 24B stub. The stub writer checks the actual `*ptr_varvals` write position, preserving `S_DOESNT_FIT` grow-and-retry behavior.
 
-**Accepted logging policy (2026-09-09):** Stamp uniqueness across slot reuse and the resulting retry-safety guarantee require logged operations. No-logging bulk loads remain supported; skipped log appends do not advance the page LSA, so same-slot reuse can repeat a stamp in that mode. Callers must not rely on stamp-based stale-reference discrimination when logging is disabled. The precondition is on the actual logging state (`log_is_no_logging`), which SA `loaddb --no-logging` turns on after startup, so the startup parameter does not answer it. This exception does not change the logged-operation guarantee or authorize a future producer of unsafe stale references. No alternative identity mechanism is introduced by this repair.
+**Accepted logging policy (2026-09-09):** stamp uniqueness across slot reuse and retry safety require logged operations. Supported no-logging bulk loads may repeat a stamp because skipped appends do not advance page LSA; callers cannot rely on stale-reference discrimination there. Check actual `log_is_no_logging`, not the startup parameter: SA `loaddb --no-logging` enables it after startup. This exception does not weaken the logged guarantee or authorize unsafe stale-reference producers; no alternative identity mechanism is selected.
 
-**Accepted eager-cleanup policy (2026-09-09):** Vacuum treats an absent or reused head as a successful silent skip. Eager reclamation completes DML but emits a diagnostic when cleanup is skipped; the successful call leaves no stray error in the error stack. Matching malformed heads and operational failures remain errors. Implementation and regression verification of this policy are pending the PR repair.
+**Accepted eager-cleanup policy (2026-09-09):** vacuum skips absent/reused heads silently. Eager cleanup completes DML but emits a diagnostic for skipped cleanup; successful calls leave no stray error stack. Matching malformed heads/operational failures remain errors. Repair progress has one [CBRD-26950 entry](docs/reference/implementation-observations.md#cbrd-26950-identity-stamp-repair).
 
-### Best Page Policy (3-Tier Bestspace — M2, CBRD-26658)
+### Best Page Policy (3-Tier Bestspace — CBRD-26658)
 
-Mirrors the heap file's proven 15+ year bestspace architecture. OOS file page 0 holds `OOS_HDR_STATS` (best[10] hints, space estimates, persisted to disk as non-logged hints). A separate global cache (`OOS_BESTSPACE_CACHE`) uses dual hash tables (VFID→entry, VPID→entry) with its own mutex, fully independent from heap's `bestspace_mutex`.
+OOS file page 0 holds `OOS_HDR_STATS`: best[10] hints and space estimates, persisted as non-logged hints. The independent `OOS_BESTSPACE_CACHE` uses dual hash tables (VFID→entry, VPID→entry) and its own mutex rather than heap's `bestspace_mutex`.
 
-```
+```text
 oos_find_best_page()
-│
-├─ [1] Fix header page (WRITE latch), load OOS_HDR_STATS best[] hints
-├─ [2] oos_stats_find_page_in_bestspace()
-│   ├── Tier 1: Global hash cache lookup (VFID key)
-│   ├── Tier 2: best[10] circular array scan
-│   └── Tier 3: Candidate page fix (CONDITIONAL_LATCH, zero-wait)
-├─ [3] If not found → oos_stats_sync_bestspace()
-│   └── Scan OOS file pages (max 20%, 100 page limit)
-│       → Recharge best[] and global cache → retry
-└─ [4] Still not found → oos_file_alloc_new()
+  Fix header (WRITE latch), load best[] hints
+  -> global VFID cache -> best[10] circular hints
+  -> fix candidate with CONDITIONAL_LATCH (zero wait)
+  -> on miss, oos_stats_sync_bestspace(): sample pages (max 20%, 100-page limit)
+     recharge hints/cache and retry
+  -> on remaining miss, reach the single growth point through the reclaim gate (§4)
 ```
 
-- **Delete/rollback**: `oos_rv_redo_delete()` calls `oos_stats_del_bestspace_by_vpid()` to evict stale cache entries
-- **Crash recovery**: Sync scanner auto-rediscovers free space (self-healing, since hints are non-logged)
-- **Concurrency**: Zero-wait conditional latch avoids deadlocks during multi-transaction INSERT
-- **Implementation status — DONE (CBRD-26954, 2026-07-01):** the fit-check previously over-reserved by one slot. `oos_find_best_page` now compares `rec_length` directly against `spage_max_space_for_new_record`, matching the heap contract; commit `e51dc8fd1b` removed the redundant `sizeof(SPAGE_SLOT)` addition.
+Fit checks compare `rec_length` directly with `spage_max_space_for_new_record`; its result already accounts for the new slot. Delete/rollback evicts stale VPID cache entries through `oos_stats_del_bestspace_by_vpid`. Recovery rediscovers free space through sync; correctness must survive lost non-logged hints. Conditional latches avoid waiting while choosing a candidate.
 
-> **Planned change (ADR-0001, CBRD-26831):** Tier-3 sync currently enumerates pages with `file_numerable_find_nth` because the OOS file is created `is_numerable=true`. This is the only *always-permanent + numerable* file in CUBRID, and once per-page vacuum dealloc is wired it enters an unvalidated mark-delete-churn regime. The plan is to make `FILE_OOS` **non-numerable** and enumerate via a **sector-bitmap walk** (`file_get_all_data_sectors`). That walk reads a frozen bitmap snapshot, so sampled pages must be fixed with `OLD_PAGE_MAYBE_DEALLOCATED` (read-only hint path only; the insert path keeps plain `OLD_PAGE`). Do it *before* `oos_remove_page` gets vacuum callers. See `docs/adr/0001-oos-page-enumeration-non-numerable.md`. _Status 2026-07-02: implemented on `oos-m2-all-plans-experimental` (creation `is_numerable=false`; sync + stats converted to the bitmap walk via `oos_collect_data_page_vpids` with `OLD_PAGE_MAYBE_DEALLOCATED` + `PAGE_OOS` type check). The ADR's skipped-page observability counter (Consequence 3) is NOT yet added. Pending TC verification/merge._
+**Accepted enumeration (ADR-0001):** `FILE_OOS` is a non-numerable permanent file. Tier-3 sync enumerates pages with a sector-bitmap walk (`file_get_all_data_sectors`), using VPID-based resume rather than nth-page order. Install this before per-page vacuum deallocation. The bitmap is a frozen private-memory snapshot and concurrent deallocation is permitted throughout the walk:
+
+- Fix read-only sampled pages with `OLD_PAGE_MAYBE_DEALLOCATED`; skip `ER_PB_BAD_PAGEID` and count skipped-deallocated-page observations.
+- Keep the actual insert/write path on plain `OLD_PAGE`: targeting a freed page there is a bug.
+- Use the file manager's bitmap metadata without adding a per-page chain or per-allocation enumeration WAL.
+
+Rationale and rejected alternatives are in [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md); implementation evidence is under [CBRD-26831](docs/reference/implementation-observations.md#cbrd-26831-page-enumeration).
 
 ---
 
@@ -294,122 +183,47 @@ oos_find_best_page()
 
 ### INSERT
 
-```
-heap_insert()
-  |
-  +-> heap_attrinfo_determine_disk_layout()
-  |   +-> record > PG-style four-record heap target?
-  |       sort eligible variable values (size > 24B) by size DESC,
-  |       demote largest first until target reached or candidates exhausted
-  |   +-> (reject if record still > ~16KB while has_oos -> ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE)
-  |
-  +-> OOS VFID: heap header has VFID? if not: oos_file_create()
-  |
-  +-> For each selected OOS-backed attribute:
-  |   +-> oos_insert() -> returns head OOS OID
-  |
-  +-> Build heap record:
-      +-> variable area: OOS inline stub (24B) + IS_OOS flag in VOT
-      +-> MVCC header: set HAS_OOS flag
-      +-> spage_insert() into heap page
+`heap_insert` → `heap_attrinfo_determine_disk_layout` applies §1 demotion/rejection. Create the associated OOS file if absent, then `oos_insert` each selected value and obtain its head OOS OID plus stamp. Build the heap record with 24B stubs, per-attribute IS_OOS flags, and record HAS_OOS; insert it with `spage_insert`. Log both heap and OOS inserts when logging is enabled.
 
-WAL: log both heap insert + OOS inserts
-```
+### SELECT: Resolve and Expand
 
-### SELECT (OOS Resolve)
+Read the heap record and its flags. Attribute-layer consumers use **Resolve**:
+`heap_attrinfo_read_dbvalues` → `heap_attrvalue_read_oos_inline` → `oos_read`, reconstructing only accessed OOS-backed attributes.
 
-```
-heap_get() / scan
-  |
-  +-> Read heap record from page
-  |
-  +-> Check OR_MVCC_FLAG_HAS_OOS in MVCC header
-  |   +-> 0: return as-is (no OOS)
-  |   +-> 1: proceed to resolve
-  |
-  +-> heap_record_replace_oos_oids()   (record-level Expand; opt-in via
-  |   HEAP_GET_CONTEXT.expand_oos since CBRD-26729 — see §3 Census. Most
-  |   fetches DON'T set it and instead let the attribute layer Resolve per column)
-      +-> Iterate VOT: for each OOS-backed attribute
-          +-> oos_read() -> fetch actual value from OOS file
-      +-> Reconstruct full record (size expands significantly)
-```
+Raw-byte consumers require **Expand**: `heap_record_replace_oos_oids` replaces every stub and rebuilds the whole `RECDES`, gated by `HEAP_GET_CONTEXT.expand_oos`. Choose Expand when shipping bytes in client `LC_COPYAREA`, re-inserting into another heap, comparing record bytes, or parsing through `OR_BUF`. Fixed/header/CHN-only or existence checks and attribute-layer consumers use the cheap fetch.
 
-### Visible-version fetch family (CBRD-26847 census)
+### Visible-version fetch family (CBRD-26847)
 
-All "visible version" fetchers funnel into `heap_get_visible_version_internal`. OOS **Expand** is
-opt-in via a single flag (`HEAP_GET_CONTEXT.expand_oos`, checked once in `heap_record_replace_oos_oids`,
-`heap_oos.cpp`). Choosing rule: **a path needs Expand only if it consumes raw recdes bytes (ships to
-client `LC_COPYAREA`, re-inserts into a heap, byte-compares, or `OR_BUF`-parses); otherwise the
-attribute layer Resolves per attribute and the cheap fetch is correct AND faster.** See ADR
-`docs/adr/0003-oos-expansion-is-opt-in.md`.
+These fetchers funnel into `heap_get_visible_version_internal`. Expand is opt-in, as accepted by [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md):
 
-| Function | Expands? | Use when |
-|----------|----------|----------|
-| `heap_get_visible_version` | No | recdes read via attribute layer / fixed / header / existence |
-| `heap_get_visible_version_expand_oos` | Yes | recdes consumed as raw bytes |
-| `heap_scan_get_visible_version` | No (by design) | heap scan; attr layer resolves lazily |
-| `heap_get_last_version` | No | update/delete latest-version fetch (callers read via attr layer) |
+| Function | Expands? | Consumer contract |
+|---|---|---|
+| `heap_get_visible_version` | No | Attribute layer / fixed / header / existence |
+| `heap_get_visible_version_expand_oos` | Yes | Raw record bytes |
+| `heap_scan_get_visible_version` | No | Heap scan; attribute layer resolves lazily |
+| `heap_get_last_version` | No | UPDATE/DELETE latest-version fetch via attribute layer |
 
-**Census result:** of ~22 `_expand_oos` call sites, only **5 genuinely need Expand**
-(`xlocator_lock_and_fetch_all`, `redistribute_partition_data`, `catcls_delete_instance`,
-`catcls_update_instance`, `catcls_update_class_stats`); the other ~17 were mechanically migrated and
-should revert to the cheap fetch. **Mirror hazard:** raw-byte paths that *forgot* to Expand leak
-unresolved OOS inline stubs — known instance `xlocator_fetch_all` → unloaddb/compactdb (`load_object.c` is
-OOS-blind). Ticket of record: **CBRD-26948 (OPEN)** — making Expand opt-in in PR #7093 (CBRD-26729)
-left `xlocator_fetch_all` no longer expanding, re-leaking OIDs to unloaddb/compactdb. (Was loosely
-attributed to CBRD-26583 / PR 7093.)
+New callers must justify the fetch contract. The `_expand_oos` suffix signals that the resulting `RECDES` may leave the attribute layer. The caller census and unloaddb/compactdb gap are maintained under [CBRD-26847](docs/reference/implementation-observations.md#cbrd-26847-fetch-contract-census) and [CBRD-26948](docs/reference/implementation-observations.md#cbrd-26948-raw-byte-fetch-gap).
 
-### UPDATE (Always New OID — M1)
+### UPDATE ownership and chain reuse (CBRD-27230)
 
-**3-step process:**
+**Accepted on 2026-08-13:** reuse existing OOS value chains for attributes **not assigned by the UPDATE statement**. Preserve their entire 24-byte stub, including head OOS OID, length, and identity stamp; reuse requires neither value comparison nor a read/reinsert of those values. Assigned attributes follow ordinary demotion and insertion, even if assigned an equal value.
 
-1. Determine OOS candidates for new record -> `oos_insert()` -> new value chains and head OOS OIDs
-2. Write updated heap record with new OOS inline stubs
-3. Previous heap record (with old OOS inline stubs) saved to undo log as-is
-4. Old OOS value chains remain alive — old transactions may access them via MVCC undo
-5. When vacuum removes the old heap-record version, `oos_delete()` cleans up its OOS value chains
+**Ownership invariant:** an OOS value chain is owned by the newest logical record version that references it. Older versions hold borrowed references through their undo images. Release a dropped chain exactly once through the committing UPDATE's notification, consumed by vacuum, or through vacuum's removal of the row's last version (REMOVE path). Undo images are never a deletion source.
 
-```
-Before UPDATE:
-  heap: [ ... | OOS stub { head OID (1|1|33), full length } | 'bbbbb' ]
-  OOS page 1, slot 33: 'aaaa...(4500B)'
+1. Plan reused stubs, newly inserted values, and the list of dropped chain references.
+2. Write the new heap record and retain the previous record **as-is** in undo, including its stubs, for rollback and snapshot readers.
+3. For committed UPDATEs, emit **`RVOOS_NOTIFY_VACUUM`** from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs. Vacuum consumes the notification when reclamation is safe for MVCC readers. Remove the UPDATE undo-image forward-walk deletion path.
+4. Use CBRD-26950 identity-checked deletion for vacuum retry idempotency. Identity checks alone cannot decide whether a shared chain was dropped: borrowed and live stubs can have the same stamp.
+5. Include a marker item per reused attribute in replication and replica-side fixup; preserve replica-local OOS references (§4).
 
-UPDATE tbl SET vc2 = 'hello' WHERE id = 1;
+DELETE's REMOVE path and the SA/non-MVCC eager path keep their roles. Eager cleanup compares old and new references so a chain retained by the post-image survives. Commit notifications do not authorize deleting borrowed chains while older snapshots can still read them.
 
-Step 1: oos_insert -> new value chain and head OOS OID
-  OOS page 2, slot 44: 'aaaa...(4500B)'             <- new record
-
-Step 2: Update heap record
-  heap: [ ... | OOS stub { head OID (1|2|44), full length } | 'hello' ]
-  undo log: [ ... | OOS stub { head OID (1|1|33), full length } | 'bbbbb' ]
-
-Step 3: Old OOS value chain stays alive
-  OOS page 1, slot 33: 'aaaa...(4500B)'              <- MVCC readers may need it
-  -> vacuum will oos_delete when cleaning old heap record from undo log
-```
-
-**Ownership invariant (M1, superseded on paper)**: Each OOS value chain is owned by exactly one logical heap-record version. OOS value chains are not shared across record versions. The inline stub stores the head OOS OID; non-head OOS OIDs are linked from the preceding chunk record.
-
-**Superseding ownership invariant (accepted design — CBRD-27230, 2026-08-13; effective once implemented)**: An OOS value chain is owned by the newest logical record version that references it; older versions hold borrowed references via their undo images. A chain is released exactly once — by the commit of the UPDATE that dropped it (`RVOOS_NOTIFY_VACUUM`, consumed by vacuum) or by vacuum's removal of the row's last version (REMOVE path). Undo images are never a deletion source.
-
-**Current implementation**: Always creates a new OOS value chain and head OOS OID even if the value is unchanged. Value-chain reuse is now an **accepted design (CBRD-27230)**, not yet implemented; the current code's vacuum forward-walk still relies on old/new head-OID disjointness (`heap_attrinfo_insert_to_oos` always allocates fresh chains).
+This supersedes the M1 always-new-chain/exclusive-version ownership rule and the older sharing-check proposal. Acceptance does not establish implementation completion. See the [CBRD-27230 evidence entry](docs/reference/implementation-observations.md#cbrd-27230-update-chain-reuse) and [historical M1 flow](docs/reference/design-history.md#m1-update-and-vacuum).
 
 ### DELETE
 
-```
-heap_delete()
-  |
-  +-> Add MVCC delete ID to record
-  |   +-> Modified record stored back to heap page
-  |
-  +-> OOS inline stubs: DO NOT TOUCH
-      +-> OOS value chains NOT deleted (MVCC readers may need them)
-      +-> OOS-backed attributes NOT resolved (heap page has 16KB limit)
-      +-> Vacuum handles OOS cleanup later
-```
-
-**Why not delete immediately**: Deleted records still exist on the heap page (MVCC). The 16KB page limit means OOS-backed attributes cannot be resolved in place because the expanded record may not fit. OOS cleanup is therefore deferred to vacuum.
+In MVCC mode, `heap_delete` sets the delete ID and writes the record back to the heap page. Retain stubs and their chains for older readers until vacuum. Do not Resolve OOS values in place: expansion may exceed the 16KB heap-page limit. The SA/non-MVCC eager path retains its separate cleanup role.
 
 ---
 
@@ -417,211 +231,65 @@ heap_delete()
 
 ### Recovery & Replication Invariants
 
-These invariants MUST hold — test scenarios verify each one:
+1. **WAL completeness:** with logging enabled, log every OOS insert/delete and recover the last committed transaction state. The §2 no-logging exception omits recovery and stamp-uniqueness guarantees.
+2. **Undo correctness:** UPDATE/DELETE undo retains the previous record as-is with its OOS inline stubs, rather than expanded values. Rollback restores that record with live referenced chains. Snapshot reads reconstruct it via `prev_version_lsa` → undo `RECDES` → `oos_read`; keep borrowed chains alive until MVCC-safe reclamation. Undo is a read/rollback source, never an OOS deletion source.
+3. **No orphan chains after UPDATE:** use the accepted §3 ownership and commit-conditional notification contract for dropped chains; retain reused chains. Remove the historical forward-walk mechanism rather than assuming old/new references are disjoint.
+4. **DELETE safety:** retain stubs and chains until vacuum can safely remove the row's last version. Do not Resolve OOS values in place during heap DELETE.
+5. **Replication completeness:** supply enough information for the replica to reconstruct equivalent values and correct **replica-local** references. Master and replica OOS OIDs may differ.
+6. **File association:** each heap file has at most one OOS file; its VFID is stored in the heap header.
 
-1. **WAL completeness**: With logging enabled, every OOS insert/delete is logged, and crash recovery restores the last committed transaction state. The accepted no-logging bulk-load exception omits these recovery and stamp-uniqueness guarantees; see the logging policy in §2.
-2. **Undo correctness**: Update/delete undo retains the previous record **as-is, including its OOS inline stubs** — undo does NOT store resolved values (that would bloat the undo log and defeat the whole point of OOS). Rollback restores the previous record, whose head OOS OIDs still point to live value chains; MVCC snapshot reads reconstruct the old version the same way (via `prev_version_lsa` → undo recdes → `oos_read`), which is exactly why old OOS value chains must survive until vacuum (see invariant 3). The vacuum forward-walk depends on this — it extracts head OOS OIDs straight out of the undo recdes. _(Corrected 2026-06-02: the prior text claimed undo holds fully-resolved values with no stubs, which contradicts invariant 3 and the code; it had misled a fix proposal toward deleting old OOS values inline.)_
-3. **No orphan OOS value chains after update**: On update, old OOS value chains remain for MVCC. When vacuum removes the old heap-record version, `oos_delete()` cleans up its value chains.
-4. **Delete safety**: Deleted heap records retain their OOS inline stubs. OOS value chains are NOT deleted at delete time — they remain accessible until vacuum.
-5. **Replication log completeness**: Replication log contains enough info to replay OOS operations on replica. OOS OIDs in replication log point to correct OOS pages on replica.
-6. **OOS file <-> heap file 1:1**: Each heap file has at most one OOS file. The OOS VFID is stored in the heap header page.
+### Replication References
 
-### Replication Notes
+The replica performs its own `oos_insert` for newly written values and fixes the heap stub with its own head OOS OID and identity stamp; master physical references must not become replica storage references. The accepted UPDATE-reuse design adds per-attribute reuse markers and replica-side fixup using the replica's retained chain. Value equality is the guarantee, not OID equality.
 
-- **Slave OOS OIDs may differ from master** — only value equality is guaranteed, not OID equality.
-- Replication log must carry sufficient data for slave to perform its own `oos_insert` operations.
+### Vacuum + OOS
 
-### Vacuum + OOS (IMPLEMENTED — CBRD-26668, PR #6986 merged)
+In MVCC mode, UPDATE/DELETE retain chains needed by old readers; cleanup occurs only after visibility permits it. The accepted cleanup sources are committed UPDATE notifications for dropped chains and REMOVE for a row's last version. REMOVE deletes within the caller's sysop; notification cleanup uses atomic system operations. Chunk deletes are logged so a mid-delete failure/recovery rolls back or replays the appropriate atomic operation. The SA/non-MVCC eager path reclaims unreferenced chains synchronously and follows §2 diagnostic policy.
 
-DELETE/UPDATE never clean OOS value chains inline; vacuum reclaims them when it reclaims the dead heap-record versions that owned them. Three cleanup paths (`vacuum_oos.cpp`, `heap_oos.cpp`):
+Deleting a **chunk record** frees a slot. Reclaiming an empty **page** returns it to the file manager and is a separate requirement below. The old forward-walk implementation and its dates/functions live in [design history](docs/reference/design-history.md#m1-update-and-vacuum), with issue-specific progress in [CBRD-26668](docs/reference/implementation-observations.md#cbrd-26668-vacuum-integration) and [CBRD-27237](docs/reference/implementation-observations.md#cbrd-27237-rollback-and-vacuum).
 
-1. **Forward-walk (MVCC old versions)** — `vacuum_forward_walk_oos_delete_atomic` (`vacuum_oos.cpp:154`): pulls old head OOS OIDs straight out of the UPDATE/DELETE undo recdes (relies on invariant 2) and `oos_delete`s their value chains. Runs in *its own* sysop with no enclosing sysop, so a mid-walk failure rolls back only its own deletes.
-2. **Within-sysop (current record)** — `vacuum_heap_oos_delete_within_sysop` (`vacuum_oos.cpp:383`): deletes OOS value chains owned by a heap record being vacuumed, inside the caller's sysop.
-3. **Eager (non-MVCC / SA_MODE)** — `heap_oos_delete_unreferenced` (`heap_oos.cpp:425`): single-process mode has no vacuum, so old value chains are deleted synchronously at UPDATE time, comparing old and new head OOS OIDs to keep any chain the post-image still references.
+### Empty-Page Reclaim Invariant (CBRD-26786; accepted 2026-08-28)
 
-- **Chunk record vs page**: vacuum deletes OOS *chunk records* (slots); empty-*page* reclaim is CBRD-26786 — accepted as an invariant (see the 2026-08-28 spec note) and implemented on PR #7617 (pending merge): the dead `oos_remove_page` is gone, vacuum feeds the pages a committed delete batch touched to the batch API `oos_reclaim_empty_pages` once per heap-page batch after the home page is unfixed, the LSA gate defers pages whose deleter may still be live, and the growth-gate sweep (`oos_reclaim_sweep_step`, run by the single growth point `oos_alloc_page_with_reclaim`) rediscovers on the sector bitmap whatever the fast path missed — including the eager/SA path's pages. The non-numerable migration (ADR-0001) landed as a prerequisite inside the same PR; legacy numerable files skip reclaim.
-- **Crash mid-delete**: each chunk delete is logged within a sysop, so recovery redo/undo keeps OOS state atomic with the heap reclamation.
+Every fully emptied OOS data page is eventually returned to the file manager. An OOS file reserves a new sector only when no safely reclaimable empty page exists **right now**. This is an invariant, including the SA/non-MVCC eager path; cache coverage or a best-effort vacuum optimization is insufficient.
 
----
+Three mechanisms deliver the invariant:
 
-## 5. Implementation Conformance Status — Non-normative
+- **Vacuum fast path:** after a committed delete batch and after unfixing the home heap page, feed candidate OOS pages once per heap-page batch to `oos_reclaim_empty_pages`. Use a two-phase check to revalidate emptiness before deallocation. Identity repair refines the candidate list to pages actually emptied by deletion, each reported once. Freeing chunks does not itself free their pages.
+- **LSA reclaim gate:** for each reclaim call, sample the horizon as the minimum head LSA of active regular transactions and active system tdes, clamped to the pre-scan append LSA. Deallocate an empty page only when its page LSA is older. Otherwise classify it **deferred**: abort by a still-active deleter may need to undo chunk deletes into that page. It becomes reclaimable when the writer finishes.
+- **Growth-gate sweep:** at the file's single growth point (`oos_alloc_page_with_reclaim`), use a per-VFID, non-evicting in-memory side map `{pending_deletes, swept_this_boot, sweep_cursor}` under the bestspace mutex. The pending-delete counter records deletes not yet accounted for by a completed sweep lap; only zero/non-zero matters. Pending deletes, or the boot rule after lost hints, arm an incremental sector-bitmap sweep (`oos_reclaim_sweep_step`) resumed from the saved cursor. Stop at the first reclaimed page, which the following `file_alloc` immediately reuses. A lap reclaiming nothing settles the counter; deferred pages keep it armed while growth proceeds. Hint loss costs one boot-rule lap, never a page; bitmap and on-disk emptiness are authoritative.
 
-### Known Bugs
-
-| Issue | Description | Impact | JIRA |
-|---|---|---|---|
-| **Vacuum deletes live data in reused OOS slot** | Vacuum frees an OOS slot → another row's `oos_insert` reuses the same `(volid,pageid,slotid)` (OOS pages are `ANCHORED`) → block retry (worker pause / mid-block error / crash recovery; `start_lsa` only advances on full-block completion) re-derives the old OID from the immutable undo image and re-deletes it, now hitting the *live* row's chunk (whole chain if multi-chunk). Probe `oos_chunk_exists` checks "occupied", not "mine" — the pre-fix `oos_record_header` had no identity stamp. Found in PR #6986 review | **CRITICAL — silent data loss on the pre-fix implementation.** Accepted replacement design (2026-09-04): page-LSA identity stamp, 24-byte stub and chunk header, identity-checked delete. PR #7695 head `c09d6c6d9` implements the design; review repairs and policy decisions remain open (2026-09-09). The former slot-0 counter proposal was rejected. | CBRD-26950 |
-| **Vacuum deletes a rolled-back UPDATE's old chains** | The forward-walk acts on undo-image content with no commit/abort filter (`vacuum_process_log_record` gates only dropped files and rcvindex); rollback restores the pre-image whose stubs still reference the old chains, the aborted MVCCID retires normally, and the forward-walk then deletes the live row's chains. Runtime-reproduced on 2026-09-09 against original engine `b871ea386` and the then-current routing candidate: disabled regression `OosRealVacuum.RolledBackUpdateKeepsCommittedOosAfterVacuum` is preserved in local commit `479cd960ec04196c92bf9789b1fc340af9046c2c`, but is absent from current PR #7990 and PR #7927. The failure needs no block retry — one normal vacuum run suffices. Not preventable by the CBRD-26950 stamp (undo image and live stub carry the same (head OID, identity stamp)) | **Data loss (merge gate).** Fixed by CBRD-27230's commit-conditional notify emission (forward-walk removed) | CBRD-27237 |
-| ~~TDE not applied to OOS pages~~ | **DONE on `feat/oos`**: CBRD-26830 / commit `138f624964` added both defenses: `xfile_apply_tde_to_class_files` includes an existing OOS file, and lazy creation applies the class TDE algorithm before publishing the OOS VFID | Fixed 2026-06-16 | CBRD-26830 |
-| ~~OOS inline-stub writer bounds-checked the wrong pointer~~ | **DONE on `feat/oos`**: CBRD-26814 / commit `bceac0ddc` checks the actual stub write position `*ptr_varvals`, restoring the `S_DOESNT_FIT` grow-and-retry path. BLOB/CLOB locators remain OOS-demotable per ADR-0002 | Fixed 2026-07-03 | CBRD-26814 |
-| unloaddb 1.6-1.7x slower | `heap_attrinfo_start` called per `heap_next` in `feat/oos` branch | Performance regression | CBRD-26458 |
-| ~~UPDATE calls `oos_read` 3x redundantly~~ | Record-level Expand redundancy removed: `heap_record_replace_oos_oids` is now opt-in via `HEAP_GET_CONTEXT.expand_oos`, so non-raw-byte fetches use the cheap attribute-layer Resolve. Residual "UPDATE re-reads unchanged OOS-backed attributes" is M1 design (no OID reuse), not a bug — confirmed by CBRD-26953 | **DONE** (CBRD-26729 in `feat/oos`) | CBRD-26516 |
-| CDC flashback OOS-stub Resolve | CDC flashback needs to replace OOS inline stubs with actual values in recdes | Missing feature | — |
-| Unnecessary OOS replication log in `locator_add_or_remove_index` | OOS replication log forced in unrelated context | Refactoring needed | — |
-| RECDES length 4-byte limit | OOS recdes max size limited to 2GB (4-byte length). May need 8-byte extension for 16EB max | Design limitation | — |
-| `spacedb`/`diagdb` can't see OOS space | `cubrid spacedb` counts `FILE_OOS` as heap — no `SPACEDB_OOS_FILE`; OOS files store no owner metadata in `FILE_DESCRIPTORS` so can't be attributed to a table. _2026-07-02: the `FILE_OOS` utility **asserts** (`file_tracker_item_spacedb` `assert_release(false)`, `file_tracker_get_and_protect`, `file_header_dump_descriptor`) crashed manual QA (`cbrd_20644`, `tbl_enc_08/14`, `_02_show_archive_log_header`, `json_backup_restore`); fixed on `oos-m2-all-plans-experimental` by intentionally folding OOS into `SPACEDB_HEAP_FILE` (TOAST-style "table storage" accounting, zero output drift) and letting read-only tracker scans pass OOS unprotected. Durable follow-up: `FILE_OOS_DES{class_oid}` owner descriptor → standard conditional-lock protection + per-table attribution (prerequisite for CBRD-27350)._ | No release-build tool proves a row went OOS or how much space OOS uses per table — only debug `oos.log` does. Forces the OOS test merge-gate onto debug builds. Unprotected tracker pass leaves a narrow SERVER_MODE checkdb-vs-DROP race until the descriptor lands | QA tooling ask — ticket of record CBRD-27350 (T1 `SPACEDB_OOS_FILE` + T2 owner descriptor; the old CBRD-26871 was resolved as duplicate, its T1/T2 candidates re-filed as CBRD-27350 on 2026-09-01) |
-
-### Limitations (Milestone 1)
-
-| Limitation | Impact | Future Fix |
-|---|---|---|
-| ~~No OOS file cleanup on DROP TABLE~~ | ~~OOS file leaked after its heap file was destroyed~~ | **DONE** (CBRD-26608: `oos_remove_file`) |
-| ~~Bestspace = last-insert-page only~~ | ~~Hotspot on single page, wasted space~~ | **DONE** (CBRD-26658: 3-tier bestspace) |
-| ~~Bulk-externalize every variable value > 512B~~ | ~~Small values needlessly go OOS → extra `oos_read` I/O, OOS file bloat~~ | **DONE** (CBRD-26776: largest-first incremental demotion; historical gate 2KB→4KB, later superseded by the PG-style four-record target; profitable threshold 512B→strictly greater than 16B) |
-| ~~No deferred OOS cleanup after DELETE/UPDATE~~ | ~~Dead record versions left their OOS value chains permanently allocated~~ | **DONE** (CBRD-26668: vacuum integration) |
-| No OOS value-chain reuse on update | Extra I/O when value unchanged | **Accepted design — CBRD-27230** (2026-08-13): reuse for UPDATE-unassigned attributes + commit-conditional `RVOOS_NOTIFY_VACUUM` cleanup, forward-walk removed. Not yet implemented; requires CBRD-26950 |
-| Ordered fix deadlock risk | Two tx's accessing OOS pages in different order | Future improvement (M4 cancelled, not in M2) |
-| No PEEK mode for OOS reads | Always COPY semantics, extra memcpy | Future |
-| No across-page compaction | Fragmentation over time | Future |
-| `S_DOESNT_FIT` handling incomplete | Caller must handle buffer overflow | Upper-layer |
-
-### Optimization Ideas
-
-**A. Update OOS value-chain reuse (CBRD-26516)** _(future improvement — was the cancelled M3 plan; not in M2)_: In `heap_attrinfo_set_uninitialized`, prevent resolving OOS values via `heap_attrvalue_read` for unchanged attributes. Reuse the existing value chain/head OOS OID instead of creating a new chain. **Prerequisite:** the vacuum forward-walk (`vacuum_forward_walk_oos_delete_atomic`) must first gain an old∩new head-OID sharing check, or it will delete a chain the live post-image still references.
-
-**B. Defer `oos_insert` to `attrinfo_force` (Heesoo's idea)**: Unify `insert -> oos_log_insert -> oos_repl_log_insert` flow timing to `attrinfo_force`. This enables generating OOS replication log at the same time as heap record replication log, allowing PK inclusion in OOS replication log. Implementation: separate `oos_repl_log` function (existing repl log function overwrites LSA in sequence: `tail_lsa -> repl_insert_lsa -> repl_rec->lsa`, so OOS LSAs must be collected separately).
-
-**C. Minimize `pgbuf_fix` for multiple `oos_insert`**: When multiple OOS values target the same page, perform `pgbuf_fix` once instead of per-insert.
-
-**D. `oos_read` PEEK mode**: Current COPY mode requires allocating and freeing recdes each time. PEEK mode would avoid this. Requires removing `is_oos` parameter from `heap_attrvalue_transform_to_dbvalue()` and separating `spage_get_record` / `spage_insert` into OOS-specific variants.
-
-**E. Ordered OOS page fix for deadlock prevention**: Enforce globally consistent page fix order (e.g., VPID ascending) to prevent deadlocks between transactions accessing the same OOS pages in different order.
-
-### Proposed Design Discussions — Non-normative (2026/3/5 feedback)
-
-- **Multi-attribute OOS storage**: Combine multiple OOS values into one physical record vs. the current one-value-chain-per-attribute design. Direction TBD.
-- **OOS page latch contention**: Yechan's proposal — partition page into 4-64 sections with atomic latches. Deferred unless latch bottleneck becomes severe.
-- **OVF + OOS simultaneous**: A record containing OOS inline stubs that would *also* become `REC_BIGONE` (recdes > ~16K overflow) is now **rejected** at write time with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (CBRD-26937), not silently built. Test the *rejection* (e.g. large fixed `BIT(n)`/`CHAR` + OOS-backed varchar that stays > ~16KB after demotion) rather than coexistence.
-- **OOS value compression (DEFERRED to future — not M2, not built)**: Investigation (CBRD-26756) initially landed on a 2026-05-08 meeting lean toward compressing at the **common OOS-entry point** (PG TOAST `EXTENDED`-style: try compress → if still big, store OOS), covering every variable type going to OOS — today only `VARCHAR` is LZ4-compressed (at the type/OR layer, ≥255B); `VARNCHAR`/`VARBIT`/`JSON`/`SET`/`MULTISET`/`SEQUENCE` are not compressed anywhere. CBRD-26881 then reframed the real fork as **type-serialization layer (`mr_data_writeval`)** vs **OOS boundary**, deferring the choice to ANALYSIS. **Current direction (CTO): defer compression to a future milestone and, when done, control it at the data-type serialization layer (`mr_data_writeval`), NOT the OOS layer** — this supersedes the earlier OOS-entry lean in CBRD-26756. Zero compression code exists in `oos_file.cpp`/`heap_oos.cpp` today. (Beware: the two tickets label their options "A"/"B" in *opposite* directions — describe by layer location, not letter.)
-- **CHAR type as OOS candidate**: Evaluate storing CHAR columns as OOS when they exceed threshold.
+The [ADR-0001 non-numerable enumeration contract](#best-page-policy-3-tier-bestspace--cbrd-26658) is the prerequisite. Revision-specific PR evidence and historical implementation caveats are maintained under [CBRD-26786](docs/reference/implementation-observations.md#cbrd-26786-empty-page-reclaim).
 
 ---
 
-## 6. Test Scenarios
+## 5. File Lifecycle, Security & Release Scope
 
-### Testing Principles
+### File Lifecycle and TDE
 
-- **Use `BIT VARYING` (VARBIT)**, NOT `VARCHAR`: CUBRID compresses strings, making disk size unpredictable. VARBIT is not compressed, so disk size is exact. _(Holds today; if future type-layer compression — CBRD-26756/26881 — ever extends to VARBIT, disk size stops being exact and this rule needs revisiting.)_
-- **Pattern**: `CAST(REPEAT('AA', N) AS BIT VARYING)` produces N bytes on disk.
-- **Size verification**: Use `DISK_SIZE(col)` (not `LENGTH` which returns bits).
-- **Distinct values**: Use different hex patterns ('AA', 'BB', 'CC', etc.) to distinguish values.
-- **OOS trigger**: record > the PG-style four-record heap target (4,060B with the current 16KB I/O page layout); then the *largest* variable values (size strictly greater than 24B) are demoted one-by-one until the record reaches the target or candidates are exhausted — **not** every eligible value. The target excludes heap unfill, matching PG's separation of TOAST threshold and fillfactor.
+Destroy the associated OOS file when its heap is destroyed on DROP TABLE (`oos_remove_file`). For TDE-enabled classes, apply the class encryption algorithm to an existing OOS file and to a lazily created OOS file **before publishing its VFID**. OOS pages must not leak plaintext. BLOB/CLOB demotion moves locator bytes only; OOS chunk deletion does not delete external LOB files, whose lifecycle remains with the LOB layer (ADR-0002).
 
-### Common Table Setup
+### CDC/Flashback: Deferred from the 11.5 Merge
 
-```sql
-CREATE TABLE oos_test (
-    id INT PRIMARY KEY,
-    small_col VARCHAR(100),
-    big_col1 BIT VARYING,
-    big_col2 BIT VARYING
-);
--- big_col1/big_col2 with large VARBIT values trigger OOS
-```
+**Accepted on 2026-09-22, ADR-0005:** defer the complete CBRD-26939 OOS-history change from PR #7990 and the CUBRID 11.5 OOS merge: durable supplemental images, reader behavior, compatibility changes, activation machinery, new CDC error handling, and the associated CCI update. Keep disk compatibility **11.5**. Introduce neither an artificial 11.6 disk level nor a per-database activation state to preserve unreleased feature artifacts. Recreate pre-release feature databases/logs when storage/log formats change; those artifacts have no cross-revision compatibility guarantee.
 
-### Test Categories
+Keep `cbrd_27064` and `cbrd_27075` enabled and visibly failing until the deferred work is redesigned. Their failures do not justify exclusion, masking, or expectation rewrites to make PR #7990 green. Close engine PR #7897 and CCI PR #112 while preserving history, branches, and research; retain PR #7990's testcase PRs for independent non-CDC expectation corrections. The unrelated intermittent `issue_11202_temp_volume_create` failure stays outside this decision.
 
-#### 1. Basic CRUD (4 tests)
-- **1.1 Insert + Select consistency**: Insert an OOS-backed heap record, verify `DISK_SIZE()` and value equality
-- **1.2 Non-trigger verification**: Records below threshold stay in heap (no OOS)
-- **1.3 Largest-first demotion (discriminating test for CBRD-26776)**: Record > the OOS inline target with two unequal eligible columns; verify only the largest values needed to reach the target are demoted. Release builds can't see per-attribute OOS placement (`DISK_SIZE` returns the logical value size regardless), so confirm via debug `oos.log` `oos_insert ... src.size=` (CBRD-27350)
-- **1.4 Bulk insert**: 100+ rows with varying sizes, verify all sizes correct
+The PR #7990 correction uses an additive revert and ordinary fast-forward commits. Its decision forbids force-push, amend, rebase, and history rewrite for that correction. After local verification/review, run full PR CI and distinguish the two expected CDC failures from unrelated failures. This is PR #7990 scope, not a Git policy for this documentation repository.
 
-#### 2. UPDATE (3 tests)
-- **2.1 OOS-backed attribute value change**: Update an OOS-backed attribute, verify the new value and eventual cleanup of the old value chain
-- **2.2 Inline attribute change**: Even changing only an inline attribute creates new OOS value chains for the record version (M1 behavior)
-- **2.3 Repeated updates**: Multiple updates to same row, final value correct
+[ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md) retains durability analysis as evidence and a **candidate direction**. Its compatibility/activation contract is superseded for this merge. Encoding, publication ordering, reader failure behavior, and compatibility enforcement require future redesign; the earlier durable-image direction is not an accepted implementation contract. For CDC/flashback discussion, also read [CONTEXT.md](CONTEXT.md) and [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md).
 
-#### 3. DELETE (2 tests)
-- **3.1 Delete + verify gone**: DELETE row, verify `COUNT(*)` decreases
-- **3.2 Delete all + reinsert**: DELETE all rows, INSERT new rows, verify table reusable
+### Deferred Capabilities and Proposals
 
-#### 4. ACID (4 tests)
-- **4.1 Atomicity (ROLLBACK)**: INSERT + UPDATE in transaction, ROLLBACK, verify original state
-- **4.2 UPDATE ROLLBACK**: OOS-backed attribute UPDATE + ROLLBACK restores the original OOS value via undo log
-- **4.3 Durability**: COMMIT -> server restart -> data survives
-- **4.4 Isolation (MVCC)**: Session 1 updates (uncommitted), Session 2 sees old value
-
-#### 5. Crash Recovery (5 tests)
-- **5.1 Committed INSERT redo**: INSERT + COMMIT + `kill -9` -> restart -> data present
-- **5.2 Uncommitted INSERT undo**: INSERT (no commit) + `kill -9` -> restart -> data gone
-- **5.3 Uncommitted UPDATE undo**: UPDATE (no commit) + crash -> original value restored (undo retains the previous record's OOS inline stubs **as-is**; on rollback their head OOS OIDs still point to live value chains — see invariant 2, NOT resolved values)
-- **5.4 Mixed committed/uncommitted**: Committed data survives, uncommitted data undone
-- **5.5 Multi-chunk crash recovery**: 50KB+ value (multi-chunk chain) survives crash
-
-#### 6. MVCC Concurrency (3 tests)
-- **6.1 UPDATE visibility**: Session 1 updates OOS (uncommitted), Session 2 reconstructs the old value via `prev_version_lsa` -> undo recdes -> `oos_read` (undo holds OOS inline stubs, not resolved values — see invariant 2)
-- **6.2 DELETE visibility**: Deleted OOS-backed heap record still visible to an earlier snapshot
-- **6.3 Concurrent multi-UPDATE**: Different sessions update different rows simultaneously, values don't mix
-
-#### 7. Multi-chunk OOS (3 tests)
-- **7.1 Large value (>16KB)**: Insert 50KB value spanning multiple OOS pages, verify chain
-- **7.2 Multi-chunk update**: Update multi-chunk OOS value, verify new chain correct
-- **7.3 Mixed sizes**: Same table with single-chunk and multi-chunk OOS values
-
-#### 8. Replication (4 tests)
-- **8.1-8.4**: INSERT/UPDATE/DELETE/multi-chunk operations replicated correctly to slave. Verify value equality (OOS OIDs may differ between master and slave).
-
-#### 9. Edge Cases (6 tests)
-- **9.1 Record gate boundary**: Verify the derived target and both sides of the boundary; with the current layout, 4,060B does not trigger and the next representable aligned size does
-- **9.2 Column eligibility floor**: Variable value ≤ 24B (`OR_OOS_INLINE_SIZE`) is never demoted, even when the record exceeds the target (demoting it would not shrink the record)
-- **9.3 NULL values**: NULL in OOS-eligible column
-- **9.4 Empty values**: Zero-length VARBIT in OOS-eligible column
-- **9.5 Many OOS-backed attributes**: 10+ attributes demoted in a single heap record
-- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375), row not stored. A non-OOS bigone, or an OOS-backed heap record left between the OOS inline target and ~16KB because candidates were exhausted, still succeeds
-
-#### 10. Stress Tests (2 tests)
-- **10.1 Bulk 1000+ rows**: All with OOS, verify all values correct
-- **10.2 Repeated updates 50+**: Same row updated 50+ times, final value correct
-
-### Key Test SQL Pattern
-
-```sql
--- OOS INSERT + verify (record must exceed the derived OOS inline target; 4,060B in the current layout)
-CREATE TABLE t (id INT, vc1 BIT VARYING, vc2 BIT VARYING);
-INSERT INTO t VALUES (1, CAST(REPEAT('AA', 3000) AS BIT VARYING),
-                         CAST(REPEAT('BB', 2000) AS BIT VARYING));
--- Record ~5KB > target → largest (vc1) demoted to OOS → ~2KB fits → vc2 stays inline
-
--- Verify size (DISK_SIZE is the logical value size — identical whether inline or OOS)
-SELECT id, DISK_SIZE(vc1), DISK_SIZE(vc2) FROM t WHERE id = 1;
--- Expected: 1, 3000, 2000
-
--- Verify value equality
-SELECT (vc1 = CAST(REPEAT('AA', 3000) AS BIT VARYING)),
-       (vc2 = CAST(REPEAT('BB', 2000) AS BIT VARYING))
-FROM t WHERE id = 1;
--- Expected: 1, 1
-
--- ROLLBACK test
-COMMIT;
-UPDATE t SET vc1 = CAST(REPEAT('CC', 3000) AS BIT VARYING) WHERE id = 1;
-ROLLBACK;
-SELECT (vc1 = CAST(REPEAT('AA', 3000) AS BIT VARYING)) FROM t WHERE id = 1;
--- Expected: 1 (rollback restored the previous record, whose OOS inline stubs still reference live value chains)
-```
-
----
-
-## Milestones — Non-normative Planning Status
-
-- **M1** (Feb 2026, DONE): Basic POC — insert/read/update/delete, WAL, recovery, replication
-- **M2** (active — umbrella for all remaining OOS work): Drop table, bestspace optimization, in-page compaction, vacuum integration, **largest-first OOS demotion (CBRD-26776, done) + OOS/bigone rejection (CBRD-26937)**
-- ~~**M3** (was: OOS value-chain reuse on update / deduplication)~~ — **CANCELLED (2026-06-02).** Value-chain reuse is deferred to a future improvement; it is NOT folded into M2 (current code always allocates a fresh chain/head OOS OID — verified via `heap_attrinfo_insert_to_oos`). See **Limitations** and **Optimization Ideas → A**.
-- ~~**M4** (TBD): Ordered fix deadlock handling, monitoring tools~~ — **CANCELLED (2026-06-02).** Deferred to future improvements; not in M2. (Ordered-fix deadlock prevention is also tracked under Limitations and Optimization Ideas → E.)
+The accepted OOS design uses separate value chains per attribute and has no OOS-layer compression requirement, PEEK mode, cross-row/content-equality deduplication, or across-page compaction. Ordered page-fix/deadlock work and broader compression remain future work. Proposed multi-attribute storage, section latches, and CHAR eligibility changes are not accepted requirements. See [design history](docs/reference/design-history.md#proposals-and-deferred-optimizations) for their rationale and dates; UPDATE-unassigned chain reuse is already accepted in §3.
 
 ---
 
 ## Writing Conventions
 
-When writing OOS-related code comments or documentation:
-
-- Use **OOS OID** only for the 8-byte physical OID of a chunk record; use **head OOS OID** when emphasizing the OID stored in the heap record
-- Use **OOS inline stub** for the 24-byte heap representation (head OOS OID + full length + identity stamp); never call the full stub an OOS OID or pointer
-- Use **OOS value** for the complete serialized attribute value, **OOS chunk record** for one physical slotted-page record, and **OOS value chain** for the complete one-or-more-chunk storage object
-- Use **OOS-backed attribute** for a particular row value; a schema column is merely eligible and its values may remain inline
-- Use **OOS file** / **OOS value** / **OOS chunk record** when referring to a concrete object; use **OOS subsystem** for the feature as a whole
-- Always add a space between inline code and Korean text: `` `oos_read` 는 `` (not `` `oos_read`는 ``)
-- Describe the record demotion gate as the **PG-style four-record heap target** derived by `heap_oos_inline_target_size()`; do not call it raw `DB_PAGESIZE/4`. State that it excludes heap unfill, like PG TOAST excludes fillfactor. The profitable demotion threshold remains `> OR_OOS_INLINE_SIZE` (strictly greater than 24B); `DB_PAGESIZE/8` / 512B are historical pre-CBRD-26776 values
-- State ownership as: each OOS value chain is owned by exactly one logical heap-record version; value chains are not shared across versions
-- Do not describe unimplemented features as existing (no PEEK mode, no OOS dedup, no across-page compaction in M1)
+- Use the glossary's terms precisely: **OOS OID** names a physical chunk OID, **head OOS OID** names the stub's OID, and **OOS inline stub** names the full 24B representation rather than a pointer/OID.
+- Distinguish **OOS value**, **chunk record**, and **value chain**. Use **OOS-backed attribute** for a row value; a schema column is eligible and may remain inline. Use **OOS subsystem** for the whole feature.
+- Keep **Expand** (record), **Resolve** (attribute), and **Read** (storage) distinct. Avoid “bulk externalization” for accepted demotion, “indexed/ordered file” for numerable, “full scan/refill” for bestspace sync, “data-sector scan” for sector-bitmap walk, and “full sweep” for cursor-resumed reclaim.
+- Describe the gate as the **PG-style four-record heap target**, derived by `heap_oos_inline_target_size()` independently of unfill; state eligibility as `> OR_OOS_INLINE_SIZE` (24B). Former `DB_PAGESIZE/8`/512B and raw quarter-page rules are historical.
+- Use the accepted [UPDATE ownership invariant](#update-ownership-and-chain-reuse-cbrd-27230); label exclusive-version ownership as historical M1.
+- Add a space between inline code and Korean text: `` `oos_read` 는 ``.
+- Label implementation, proposal, and history; accepted design does not establish implementation or merge completion. Cite dated observations for progress claims.
