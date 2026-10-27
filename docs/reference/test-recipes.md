@@ -1,6 +1,6 @@
 # OOS test recipes
 
-Last updated: 2026-10-08 (document modification).
+Last updated: 2026-10-27 (document modification).
 
 Read when preparing SQL test data or choosing regression coverage. These are **non-normative recipes**, moved from repository revision `0eab7df`; they are not new test-run results or proof of feature availability. Derive expected behavior from [OOS-CONTEXT.md](../../OOS-CONTEXT.md), and check the relevant [implementation observation](implementation-observations.md) before interpreting a capability gap. Use the native SQL/shell/medium or configured unit-test workflow appropriate to the task.
 
@@ -104,7 +104,7 @@ CREATE TABLE oos_test (
 - **9.3 NULL values**: NULL in OOS-eligible column
 - **9.4 Empty values**: Zero-length VARBIT in OOS-eligible column
 - **9.5 Many OOS-backed attributes**: 10+ attributes demoted in a single heap record
-- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375), row not stored. A non-OOS bigone, or an OOS-backed heap record left between the OOS inline target and ~16KB because candidates were exhausted, still succeeds
+- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1388 at PR #7990 head `dcbf09e`; the number shifts with `develop` merges), row not stored. A non-OOS bigone, or an OOS-backed heap record left between the OOS inline target and ~16KB because candidates were exhausted, still succeeds
 
 #### 10. Stress Tests (2 tests)
 
@@ -142,4 +142,6 @@ SELECT (vc1 = CAST(REPEAT('AA', 3000) AS BIT VARYING)) FROM t WHERE id = 1;
 
 When testing UPDATE reuse, include unassigned-stub preservation, assigned-equal-value replacement, UPDATE→ROLLBACK→vacuum→read, committed notification recovery, and master/replica-local reference handling. This applies the canonical §3/§4 contract, not the old M1 chain-count expectation. The disabled rollback regression and its historical revision are recorded under [CBRD-27237](implementation-observations.md#cbrd-27237-rollback-and-vacuum).
 
-For identity or reclaim tests, take the oracle from canonical §2/§4 and read the [identity](implementation-observations.md#cbrd-26950-identity-stamp-repair) or [reclaim](implementation-observations.md#cbrd-26786-empty-page-reclaim) evidence entry for revision-specific verification. Required CDC failures remain visible under [§5 release scope](../../OOS-CONTEXT.md#cdcflashback-deferred-from-the-115-merge); the test catalogue does not authorize masking them.
+For identity or reclaim tests, take the oracle from canonical §2/§4 and read the [identity](implementation-observations.md#cbrd-26950-identity-stamp-repair) or [reclaim](implementation-observations.md#cbrd-26786-empty-page-reclaim) evidence entry for revision-specific verification. The two deferred-CDC regressions run in the QA regression, not `develop` CI, under [§5 release scope](../../OOS-CONTEXT.md#cdcflashback-deferred-from-the-115-merge) (ADR-0007); the test catalogue does not authorize masking their failures or rewriting their expectations.
+
+Recreate persistent test databases (for example a leftover `unittestdb`) that a build formatted before the storage-format stamp: boot refuses them with `ER_BO_INCOMPATIBLE_STORAGE_FORMAT` ([§5](../../OOS-CONTEXT.md#storage-format-boot-check-adr-0006)), and `deletedb` still removes them.

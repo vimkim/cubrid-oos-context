@@ -1,7 +1,7 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for required CUBRID OOS behavior.
-> Last updated: 2026-10-08 (document modification only). Implementation observations carry their own evidence dates and revisions.
+> Last updated: 2026-10-27 (document modification only). Implementation observations carry their own evidence dates and revisions.
 
 ## Authority and reading paths
 
@@ -14,8 +14,8 @@ Keep all required behavior in this canonical file and read it completely when th
 | Comparing an engine/PR with requirements, diagnosing an issue, or checking implementation progress | [Implementation observations](docs/reference/implementation-observations.md): one maintained entry per issue, with dated revision evidence; reverify before making a current-state claim |
 | Explaining a superseded rule, earlier milestone, alternative, or optimization proposal | [Design history](docs/reference/design-history.md): non-normative snapshots and proposals |
 | Preparing test data or choosing regression coverage | [Test recipes](docs/reference/test-recipes.md): examples and scenarios, with expectations derived from this specification |
-| Discussing CDC/flashback historical images | [Historical-value vocabulary](CONTEXT.md), [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md), and [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md); apply the release scope in §5 |
-| Needing rationale for page enumeration, LOB eligibility, or Expand | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), or [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), respectively |
+| Discussing CDC/flashback historical images | [Historical-value vocabulary](CONTEXT.md), [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md), [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md), and [ADR-0007](docs/adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md); apply the release scope in §5 |
+| Needing rationale for page enumeration, LOB eligibility, Expand, or the boot storage-format check | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), or [ADR-0006](docs/adr/0006-reject-pre-stamp-databases-at-boot.md), respectively |
 
 The reference documents contain evidence and rationale. They do not add hidden requirements or replace a complete read of this file. Historical text in a linked report is interpreted under the accepted requirements here.
 
@@ -94,14 +94,14 @@ Four target-sized records fit: `4 × (4,060 + 4) = 16,256 ≤ 16,268`. The next 
 
 ### OOS + bigone Rejection (CBRD-26937)
 
-OOS stubs combined with `REC_BIGONE` overflow are unsupported. Large fixed `BIT(n)`/`CHAR` or many ≤24B variable values may keep a demoted record above the bigone threshold. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
+OOS stubs combined with `REC_BIGONE` overflow are unsupported. Large fixed-length values such as `BIT(n)`, or many ≤24B variable values, may keep a demoted record above the bigone threshold. `CHAR` is variable-length since CBRD-26663 (verified at PR #7990 head `dcbf09e`) and follows ordinary eligibility. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
 
 ```text
 if (has_oos && heap_is_big_length(expected_size))
   er_set(ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE); return S_ERROR;
 ```
 
-The error is `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1375). The rejection boundary is `heap_Maxslotted_reclength` (~16KB), not the OOS inline target. OOS-backed records between the target and that boundary are valid when candidates run out. Non-OOS bigone records are unaffected. Running the gate before `heap_attrinfo_insert_to_oos` avoids orphan chains on rejection.
+The error is `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1388 at PR #7990 head `dcbf09e`, 2026-10-27; numbers shift with `develop` merges). The rejection boundary is `heap_Maxslotted_reclength` (~16KB), not the OOS inline target. OOS-backed records between the target and that boundary are valid when candidates run out. Non-OOS bigone records are unaffected. Running the gate before `heap_attrinfo_insert_to_oos` avoids orphan chains on rejection.
 
 ---
 
@@ -145,7 +145,7 @@ Each OOS chunk record (24-byte header followed by payload):
 total_data_length is the complete OOS value length and excludes every OOS record header.
 ```
 
-Each chunk stores the page LSA captured under its write latch before that insert is logged. Stamps are per chunk, not chain-wide; the stub stores only the head's stamp. Insert redo/delete undo restore the stored stamp from the logged image. Pack the stub stamp into one bigint; the header stores raw `LOG_LSA`. Recreate test databases built with older unreleased layouts and use matching install artifacts.
+Each chunk stores the page LSA captured under its write latch before that insert is logged. Stamps are per chunk, not chain-wide; the stub stores only the head's stamp. Insert redo/delete undo restore the stored stamp from the logged image. Pack the stub stamp into one bigint; the header stores raw `LOG_LSA`. Recreate test databases built with older unreleased layouts and use matching install artifacts; boot refuses databases formatted before the storage-format stamp (§5).
 
 **Accepted identity checks (CBRD-26950):** validate the expected head stamp before returning payload or deleting a chain. Under the head latch, tolerate deallocated/retyped pages and missing/reused slots without interpreting another page type as a slotted page. Reads reject stale references with `ER_HEAP_OOS_CORRUPTED_RECORD`, rather than returning another occupant's bytes. Deletion compares identity under the same write latch that deletes the head; an absent/reused head is a clean no-op. Matching malformed/non-head references and operational failures are errors. Stub parsing, extraction, and replica fixup respect the VOT-defined field width before reading/writing the 24B stub. The stub writer checks the actual `*ptr_varvals` write position, preserving `S_DOESNT_FIT` grow-and-retry behavior.
 
@@ -270,13 +270,17 @@ Destroy the associated OOS file when its heap is destroyed on DROP TABLE (`oos_r
 
 ### CDC/Flashback: Deferred from the 11.5 Merge
 
-**Accepted on 2026-09-22, ADR-0005:** defer the complete CBRD-26939 OOS-history change from PR #7990 and the CUBRID 11.5 OOS merge: durable supplemental images, reader behavior, compatibility changes, activation machinery, new CDC error handling, and the associated CCI update. Keep disk compatibility **11.5**. Introduce neither an artificial 11.6 disk level nor a per-database activation state to preserve unreleased feature artifacts. Recreate pre-release feature databases/logs when storage/log formats change; those artifacts have no cross-revision compatibility guarantee.
+**Accepted on 2026-09-22, ADR-0005:** defer the complete CBRD-26939 OOS-history change from PR #7990 and the CUBRID 11.5 OOS merge: durable supplemental images, reader behavior, compatibility changes, activation machinery, new CDC error handling, and the associated CCI update. Keep disk compatibility **11.5**. Introduce neither an artificial 11.6 disk level nor a per-database activation state to preserve unreleased feature artifacts. Recreate pre-release feature databases/logs when storage/log formats change; those artifacts have no cross-revision compatibility guarantee. Boot enforces recreation with a storage-format stamp ([below](#storage-format-boot-check-adr-0006)).
 
-Keep `cbrd_27064` and `cbrd_27075` enabled and visibly failing until the deferred work is redesigned. Their failures do not justify exclusion, masking, or expectation rewrites to make PR #7990 green. Close engine PR #7897 and CCI PR #112 while preserving history, branches, and research; retain PR #7990's testcase PRs for independent non-CDC expectation corrections. The unrelated intermittent `issue_11202_temp_volume_create` failure stays outside this decision.
+**Changed 2026-10-27, [ADR-0007](docs/adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md) (QA agreement):** `cbrd_27064` and `cbrd_27075` are disabled on `develop` CI (private-ex PR #4210 moves them to `shell/_25_unstable/`, which gha-ci skips) and keep running in the QA regression until CBRD-26939 implements OOS + CDC. Do not rewrite their expectations or mask their failures there. Close engine PR #7897 and CCI PR #112 while preserving history, branches, and research; retain PR #7990's testcase PRs for independent non-CDC expectation corrections. The unrelated intermittent `issue_11202_temp_volume_create` failure stays outside this decision.
 
-The PR #7990 correction uses an additive revert and ordinary fast-forward commits. Its decision forbids force-push, amend, rebase, and history rewrite for that correction. After local verification/review, run full PR CI and distinguish the two expected CDC failures from unrelated failures. This is PR #7990 scope, not a Git policy for this documentation repository.
+The PR #7990 correction uses an additive revert and ordinary fast-forward commits. Its decision forbids force-push, amend, rebase, and history rewrite for that correction. After local verification/review, run full PR CI; the two CDC cases now report in the QA regression instead. This is PR #7990 scope, not a Git policy for this documentation repository.
 
 [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md) retains durability analysis as evidence and a **candidate direction**. Its compatibility/activation contract is superseded for this merge. Encoding, publication ordering, reader failure behavior, and compatibility enforcement require future redesign; the earlier durable-image direction is not an accepted implementation contract. For CDC/flashback discussion, also read [CONTEXT.md](CONTEXT.md) and [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md).
+
+### Storage-Format Boot Check (ADR-0006)
+
+**Accepted 2026-10-27, [ADR-0006](docs/adr/0006-reject-pre-stamp-databases-at-boot.md):** `disk_format()` stamps `DISK_STORAGE_FORMAT_REVISION` (1 = OOS) into each volume header's `storage_format` (formerly `reserved0`, 0 in earlier 11.x builds). Boot and the emergency patch require equality on volume 0 right after mounting it, before DWB/log recovery, else `ER_BO_INCOMPATIBLE_STORAGE_FORMAT`; `deletedb` does not check. Bump the revision when an unreleased change makes existing databases unreadable. The stamp is not a disk level or activation state, has no upgrade path, and is one-way (older builds still open stamped databases). Page types are append-only (`PAGE_OOS`/`PERF_PAGE_OOS` last). [Evidence](docs/reference/implementation-observations.md#cbrd-26357-storage-format-boot-check).
 
 ### Deferred Capabilities and Proposals
 

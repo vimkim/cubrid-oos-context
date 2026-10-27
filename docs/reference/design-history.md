@@ -1,6 +1,6 @@
 # OOS design history and proposals
 
-Last updated: 2026-10-08 (document modification).
+Last updated: 2026-10-27 (document modification).
 
 Read when explaining an earlier behavior, milestone, alternative, or optimization proposal. This file is **non-normative**. Material moved from `OOS-CONTEXT.md` at repository commit `0eab7df` retains its source dates; unpinned descriptions are historical context, not current implementation claims. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md).
 
@@ -13,6 +13,8 @@ Read when explaining an earlier behavior, milestone, alternative, or optimizatio
 | 2026-08-13 (CBRD-27230) | M1 exclusive-version ownership, always-new UPDATE chains, undo-image forward-walk cleanup, earlier sharing-check reuse proposal, June reuse deferral | Newest-version ownership, borrowed undo references, UPDATE-unassigned reuse, commit-conditional notifications; [§3](../../OOS-CONTEXT.md#update-ownership-and-chain-reuse-cbrd-27230) |
 | 2026-09-04; policy reconciliation recorded 2026-09-09 (CBRD-26950) | 16B stub/header and rejected slot-0 counter proposal | 24B layout with pre-insert page-LSA identity stamp; [identity evidence entry](implementation-observations.md#cbrd-26950-identity-stamp-repair) retains the successive PR heads |
 | 2026-09-22 (ADR-0005) | ADR-0004 durable-history implementation direction and activation/compatibility contract | Complete deferral from PR #7990 / 11.5 and reopened design; [release scope](../../OOS-CONTEXT.md#cdcflashback-deferred-from-the-115-merge) |
+| 2026-10-27 (ADR-0006; amends ADR-0005) | ADR-0005 recreate rule as policy only: pre-stamp databases passed boot, then hit page-type asserts (debug) or were misread (release); `PAGE_OOS` inserted mid-enum | Boot-time volume-header storage-format stamp check, equality required; page types append-only; [§5](../../OOS-CONTEXT.md#storage-format-boot-check-adr-0006) |
+| 2026-10-27 (ADR-0007; partially supersedes ADR-0005) | Keep `cbrd_27064`/`cbrd_27075` enabled and visibly failing in PR CI | Disabled on `develop` CI, kept in the QA regression until CBRD-26939; [release scope](../../OOS-CONTEXT.md#cdcflashback-deferred-from-the-115-merge) |
 
 The largest-first rule survived the gate and stub-size changes. The old >16B floor is historical; accepted eligibility uses the 24B stub. `STORAGE PREFER_INLINE` is accepted merge scope, not the older “proposed” label; its implementation evidence belongs under [CBRD-26912](implementation-observations.md#cbrd-26912-inline-preference).
 
@@ -93,7 +95,7 @@ OOS is an evolution of CUBRID's existing Overflow Page mechanism:
 
 **Design decision**: Uses low-level heap/slotted page APIs the team knows well. References existing Overflow file implementation patterns. The CUBRID team chose this over PostgreSQL-style TOAST tables (which would require multi-table transaction sync) or simple overflow page modification (which wouldn't help with network/replication layers).
 
-Accepted decisions already have maintained rationale in [ADR-0001](../adr/0001-oos-page-enumeration-non-numerable.md) (enumeration), [ADR-0002](../adr/0002-oos-lob-locator-demotion.md) (LOB eligibility), and [ADR-0003](../adr/0003-oos-expansion-is-opt-in.md) (Expand). CDC/flashback analysis is in [ADR-0004](../adr/0004-durable-oos-supplemental-images.md), under [ADR-0005](../adr/0005-defer-oos-history-from-the-11-5-merge.md)'s superseding release scope.
+Accepted decisions already have maintained rationale in [ADR-0001](../adr/0001-oos-page-enumeration-non-numerable.md) (enumeration), [ADR-0002](../adr/0002-oos-lob-locator-demotion.md) (LOB eligibility), and [ADR-0003](../adr/0003-oos-expansion-is-opt-in.md) (Expand). CDC/flashback analysis is in [ADR-0004](../adr/0004-durable-oos-supplemental-images.md), under [ADR-0005](../adr/0005-defer-oos-history-from-the-11-5-merge.md)'s superseding release scope, with the CI test policy in [ADR-0007](../adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md). Boot enforcement of the recreate rule is in [ADR-0006](../adr/0006-reject-pre-stamp-databases-at-boot.md).
 
 ## Proposals and deferred optimizations
 

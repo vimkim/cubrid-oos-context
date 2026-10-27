@@ -4,6 +4,10 @@ status: accepted
 
 # Defer OOS historical images from the 11.5 merge
 
+> **Amended by [ADR-0006](0006-reject-pre-stamp-databases-at-boot.md) on 2026-10-27.** The engine enforces the recreate rule below at boot with a volume-header storage-format stamp. Disk compatibility stays 11.5; no new level or activation state is added.
+>
+> **Partially superseded by [ADR-0007](0007-run-deferred-cdc-regressions-in-qa-regression-only.md) on 2026-10-27.** `cbrd_27064` and `cbrd_27075` are excluded from `develop` CI and keep running in the QA regression. The "enabled and visibly failing" test policy and the expected CDC failures in full PR CI below no longer apply. The deferral itself is unchanged.
+
 Accepted with the user on 2026-09-22 for CBRD-26939 and PR #7990. Defer the complete CDC/flashback OOS-history change from the CUBRID 11.5 OOS merge: durable supplemental images, reader behavior, compatibility changes, activation machinery, new CDC error handling, and the associated CCI update. PR #7990 must retain disk compatibility 11.5.
 
 ## Release and compatibility model

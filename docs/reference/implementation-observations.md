@@ -1,6 +1,6 @@
 # OOS implementation observations
 
-Last updated: 2026-10-08 (document modification).
+Last updated: 2026-10-27 (document modification).
 
 Read when comparing an engine/PR with requirements, diagnosing an issue, or checking progress. This file is **non-normative** and maintains one observation entry per issue. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md). Evidence dates/revisions below are independent of the modification date; reverify source/PR state or JIRA before making current claims. No snapshot establishes today's merge status.
 
@@ -98,6 +98,16 @@ The carried record labelled deferred DELETE/UPDATE cleanup DONE, with PR #6986 m
 ## CBRD-26939: CDC/flashback history
 
 The carried missing-feature note concerned historical OOS value reconstruction, not just replacing a still-live stub. Canonical §5 contains the 11.5 disposition. [ADR-0004](../adr/0004-durable-oos-supplemental-images.md) preserves 2026-09-08 analysis against `2940b1cfbc3c2d4d0fac3f9244a960350debd380`; [ADR-0005](../adr/0005-defer-oos-history-from-the-11-5-merge.md) defers the complete change on 2026-09-22. Acceptance/deferral records do not establish PR closure or later implementation.
+
+Observation 2026-10-27, under [ADR-0007](../adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md): private-ex PR #4210 (branch `tc/pr-7990`, head `75a02020e`) was open and moved `cbrd_27064`/`cbrd_27075` under `shell/_25_unstable/_37_elderberry/cbrd_23842_cdc/bug/`. Engine PR #7990 head `dcbf09e` excludes `_25_unstable` from gha-ci `test_shell`. Neither establishes that #4210 merged or that the QA regression ran the cases.
+
+## CBRD-26357: Storage-format boot check
+
+CBRD-26357 is the OOS epic under which PR #7990's commits are filed. Required behavior is canonical [§5](../../OOS-CONTEXT.md#storage-format-boot-check-adr-0006); decision and alternatives are in [ADR-0006](../adr/0006-reject-pre-stamp-databases-at-boot.md).
+
+Source verified 2026-10-27 at PR #7990 head `dcbf09e4f7fd02ff9c8fc6493ec8887fc2919d67` (commits `1e8701b4f`, `d8ed97f77`): `disk_check_storage_format` runs in `boot_restart_server` right after `boot_mount` of volume 0 and before `dwb_load_and_recover_pages` and `log_initialize`; `xboot_emergency_patch` runs it after its mount; `boot_remove_all_volumes` has no check. `ER_BO_INCOMPATIBLE_STORAGE_FORMAT` is -1392 and `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` is -1388 at this head. `diagdb` prints `storage_format`; static asserts pin its file offset (140) and the `PAGE_TYPE`/`PERF_PAGE_TYPE` pairs.
+
+The author's verification on 2026-10-27, recorded in the [review workspace](../../../../temp/pr7990-review-5662427700/TODO.md), reports: on a database created by a `develop` debug build, the pre-guard PR engine aborted on the page-type assert in `pgbuf_check_page_ptype_internal`; with the guard, `csql -S`, `checkdb`, `upgradedb`, and server start were refused with -1392, and `deletedb` succeeded; ctest 42/42 passed, including `test_oos_storage_format_guard`, built from `1e8701b4f` plus the then-uncommitted review repair. These runs predate head `dcbf09e` and were not repeated for this documentation change.
 
 ## Other carried observations
 
