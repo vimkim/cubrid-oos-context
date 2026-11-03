@@ -5,6 +5,8 @@ status: accepted
 # Reject pre-stamp databases at boot with a volume-header storage-format stamp
 
 > **Amends [ADR-0005](0005-defer-oos-history-from-the-11-5-merge.md).** ADR-0005's recreate rule stays; this ADR adds engine enforcement. Disk compatibility stays 11.5.
+>
+> **Amended by [ADR-0008](0008-reclaim-oos-chains-after-the-delete-is-final.md) (proposed 2026-11-03).** Format changes made before the PR #7990 merge keep revision 1; databases created by earlier pre-merge builds are recreated under ADR-0005.
 
 Accepted with the user on 2026-10-27 for PR #7990 (OOS epic CBRD-26357), answering item 2 of [review 5662427700](https://github.com/CUBRID/cubrid/pull/7990#pullrequestreview-5662427700). ADR-0005 requires recreating pre-release databases when the storage format changes, but nothing enforced it. A database created by `develop` or an earlier 11.5 build has the same disk compatibility level (11.5), so it passed every boot check. Debug builds then failed on page-type asserts; release builds misread it (for example, heap header bytes read as an OOS VFID). The engine now refuses such a database at boot, before it reads or recovers any other page.
 

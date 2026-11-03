@@ -15,7 +15,7 @@ Keep all required behavior in this canonical file and read it completely when th
 | Explaining a superseded rule, earlier milestone, alternative, or optimization proposal | [Design history](docs/reference/design-history.md): non-normative snapshots and proposals |
 | Preparing test data or choosing regression coverage | [Test recipes](docs/reference/test-recipes.md): examples and scenarios, with expectations derived from this specification |
 | Discussing CDC/flashback historical images | [Historical-value vocabulary](CONTEXT.md), [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md), [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md), and [ADR-0007](docs/adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md); apply the release scope in §5 |
-| Needing rationale for page enumeration, LOB eligibility, Expand, the boot storage-format check, or idle empty-page return | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), [ADR-0006](docs/adr/0006-reject-pre-stamp-databases-at-boot.md), or [ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), respectively |
+| Needing rationale for page enumeration, LOB eligibility, Expand, the boot storage-format check, reclaim after finality, or idle empty-page return | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), [ADR-0006](docs/adr/0006-reject-pre-stamp-databases-at-boot.md), [ADR-0008](docs/adr/0008-reclaim-oos-chains-after-the-delete-is-final.md), or [ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), respectively |
 
 The reference documents contain evidence and rationale. They do not add hidden requirements or replace a complete read of this file. Historical text in a linked report is interpreted under the accepted requirements here.
 
@@ -30,7 +30,7 @@ The reference documents contain evidence and rationale. They do not add hidden r
 | OOS value chain | One or more chunk records holding one complete value |
 | OOS OID | Physical 8B chunk OID: volid 2B, pageid 4B, slotid 2B |
 | Head OOS OID | Stub's OID of chunk index 0 |
-| Next-chunk OID | Header link to the following chunk |
+| Next-chunk link | Header link to the following chunk: its OID and identity stamp |
 | OOS inline stub | 24B: head OID 8B, full length 8B, packed head identity stamp 8B |
 | Full length | Total serialized value length, excluding all chunk headers |
 | HAS_OOS / IS_OOS | Record MVCC flag / attribute VOT flag; true iff the record contains a stub / this entry is a stub |
@@ -45,7 +45,8 @@ The reference documents contain evidence and rationale. They do not add hidden r
 | Mark-delete | Numerable deallocation flags a page-table entry; skipping accumulated entries makes `find_nth` O(n) per call |
 | Pending-delete counter (미회수 삭제 카운터) | Per-VFID zero/non-zero growth-gate hint; full accounting/boot contract in §4 |
 | Growth-gate sweep (성장 게이트 sweep) | Incremental cursor-resumed bitmap reclaim at the single growth point (§4) |
-| LSA reclaim gate (LSA 게이트) | Defers empty pages that may still be undo destinations; horizon contract in §4 |
+| Reclaim intent (회수 의도) | Postponed `(OOS VFID, head OOS OID, head stamp)` that runs the reclaimer only after its deciding transaction or sysop commits (§4) |
+| OOS reclaimer (회수기) | Redo-only, rerunnable deletion of a dead value chain: read from the head, delete from the tail, head last (§4) |
 
 ---
 
@@ -146,29 +147,30 @@ When a column value exceeds one OOS page, it's split into chunks stored as a lin
 
 ```
 Insertion order (reverse):
-  chunk_2 (tail of value) -> inserted first, next_oid = NULL
-  chunk_1 (middle)        -> inserted second, next_oid = chunk_2 OID
-  chunk_0 (head of value) -> inserted last, next_oid = chunk_1 OID
+  chunk_2 (tail of value) -> inserted first, next link = NULL
+  chunk_1 (middle)        -> inserted second, next link = chunk_2 OID and stamp
+  chunk_0 (head of value) -> inserted last, next link = chunk_1 OID and stamp
 
   Heap record's inline stub stores the head OOS OID and identity stamp of chunk_0.
 
 Read order (forward):
   Follow chain: chunk_0 -> chunk_1 -> chunk_2 -> reassemble value
 
-Each OOS chunk record (24-byte header followed by payload):
+Each OOS chunk record (32-byte header followed by payload):
   total_data_length (4B) | chunk_index (4B) | next-chunk OID (8B; NULL last)
-  identity_stamp (8B LOG_LSA) | payload fragment (variable length)
+  next-chunk stamp (8B LOG_LSA; NULL last) | identity_stamp (8B LOG_LSA)
+  payload fragment (variable length)
 
 total_data_length is the complete OOS value length and excludes every OOS record header.
 ```
 
-Each chunk stores the page LSA captured under its write latch before that insert is logged. Stamps are per chunk, not chain-wide; the stub stores only the head's stamp. Insert redo/delete undo restore the stored stamp from the logged image. Pack the stub stamp into one bigint; the header stores raw `LOG_LSA`. Recreate test databases built with older unreleased layouts and use matching install artifacts; boot refuses databases formatted before the storage-format stamp (§5).
+Each chunk stores the page LSA captured under its write latch before that insert is logged. Stamps are per chunk, not chain-wide; the stub stores the head's stamp and each next link stores the following chunk's stamp (ADR-0008). Insert redo restores the stored stamps from the logged image; a chunk delete has no undo (§4). Pack the stub stamp into one bigint; the header stores raw `LOG_LSA`. Recreate test databases built with older unreleased layouts and use matching install artifacts; boot refuses databases formatted before the storage-format stamp (§5).
 
-**Accepted identity checks (CBRD-26950):** validate the expected head stamp before returning payload or deleting a chain. Under the head latch, tolerate deallocated/retyped pages and missing/reused slots without interpreting another page type as a slotted page. Reads reject stale references with `ER_HEAP_OOS_CORRUPTED_RECORD`, rather than returning another occupant's bytes. Deletion compares identity under the same write latch that deletes the head; an absent/reused head is a clean no-op. Matching malformed/non-head references and operational failures are errors. Stub parsing, extraction, and replica fixup respect the VOT-defined field width before reading/writing the 24B stub. The stub writer checks the actual `*ptr_varvals` write position, preserving `S_DOESNT_FIT` grow-and-retry behavior.
+**Accepted identity checks (CBRD-26950):** validate the expected head stamp before returning payload or deleting a chain. Under the head latch, tolerate deallocated/retyped pages and missing/reused slots without interpreting another page type as a slotted page. Reads reject stale references with `ER_HEAP_OOS_CORRUPTED_RECORD`, rather than returning another occupant's bytes. The reclaimer compares the head stamp with its reclaim intent and each next chunk's stamp with the link; an absent, deallocated, retyped, or mismatching head is a clean no-op, and the same at a continuation ends the remaining chain. Continuation fixes tolerate deallocated/retyped pages like the head fix. Matching malformed/non-head references and operational failures are errors. Stub parsing, extraction, and replica fixup respect the VOT-defined field width before reading/writing the 24B stub. The stub writer checks the actual `*ptr_varvals` write position, preserving `S_DOESNT_FIT` grow-and-retry behavior.
 
 **Accepted logging policy (2026-09-09):** stamp uniqueness across slot reuse and retry safety require logged operations. Supported no-logging bulk loads may repeat a stamp because skipped appends do not advance page LSA; callers cannot rely on stale-reference discrimination there. Check actual `log_is_no_logging`, not the startup parameter: SA `loaddb --no-logging` enables it after startup. This exception does not weaken the logged guarantee or authorize unsafe stale-reference producers; no alternative identity mechanism is selected.
 
-**Accepted eager-cleanup policy (2026-09-09):** vacuum skips absent/reused heads silently. Eager cleanup completes DML but emits a diagnostic for skipped cleanup; successful calls leave no stray error stack. Matching malformed heads/operational failures remain errors. Repair progress has one [CBRD-26950 entry](docs/reference/implementation-observations.md#cbrd-26950-identity-stamp-repair).
+**Accepted eager-cleanup policy (2026-09-09; amended by ADR-0008):** the reclaimer skips absent/reused heads silently. Eager cleanup completes DML and records a reclaim intent that runs at commit; a skip there emits a diagnostic, and successful calls leave no stray error stack. Matching malformed heads remain errors; operational failures make the reclaimer rerun (§4). Repair progress has one [CBRD-26950 entry](docs/reference/implementation-observations.md#cbrd-26950-identity-stamp-repair).
 
 ### Best Page Policy (3-Tier Bestspace — CBRD-26658)
 
@@ -181,7 +183,7 @@ oos_find_best_page()
   -> fix candidate with CONDITIONAL_LATCH (zero wait)
   -> on miss, oos_stats_sync_bestspace(): sample pages (max 20%, 100-page limit)
      recharge hints/cache and retry
-  -> on remaining miss, reach the single growth point through the reclaim gate (§4)
+  -> on remaining miss, reach the single growth point through the growth gate (§4)
 ```
 
 Fit checks compare `rec_length` directly with `spage_max_space_for_new_record`; its result already accounts for the new slot. Delete/rollback evicts stale VPID cache entries through `oos_stats_del_bestspace_by_vpid`. Recovery rediscovers free space through sync; correctness must survive lost non-logged hints. Conditional latches avoid waiting while choosing a candidate.
@@ -230,17 +232,17 @@ New callers must justify the fetch contract. The `_expand_oos` suffix signals th
 
 1. Plan reused stubs, newly inserted values, and the list of dropped chain references.
 2. Write the new heap record and retain the previous record **as-is** in undo, including its stubs, for rollback and snapshot readers.
-3. For committed UPDATEs, emit **`RVOOS_NOTIFY_VACUUM`** from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs. Vacuum consumes the notification when reclamation is safe for MVCC readers. Remove the UPDATE undo-image forward-walk deletion path.
-4. Use CBRD-26950 identity-checked deletion for vacuum retry idempotency. Identity checks alone cannot decide whether a shared chain was dropped: borrowed and live stubs can have the same stamp.
+3. At UPDATE time, record the dropped `(head OOS OID, expected identity stamp)` pairs in a postpone; statement and savepoint rollback cancel it. The postpone runs after `LOG_COMMIT_WITH_POSTPONE` and appends **`RVOOS_NOTIFY_VACUUM`**; restart recovery reruns it when that record is durable. Vacuum consumes the notification only when no active snapshot is older than the UPDATE's commit, then runs the reclaimer (§4). Remove the UPDATE undo-image forward-walk deletion path. This postpone placement replaces the earlier commit hook (ADR-0008).
+4. The reclaimer's CBRD-26950 identity checks make reruns idempotent. Identity checks alone cannot decide whether a shared chain was dropped: borrowed and live stubs can have the same stamp.
 5. Include a marker item per reused attribute in replication and replica-side fixup; preserve replica-local OOS references (§4).
 
-DELETE's REMOVE path and the SA/non-MVCC eager path keep their roles. Eager cleanup compares old and new references so a chain retained by the post-image survives. Commit notifications do not authorize deleting borrowed chains while older snapshots can still read them.
+DELETE's REMOVE path and the SA/non-MVCC eager path keep their roles but record reclaim intents instead of deleting chunks (§4). Eager cleanup compares old and new references so a chain retained by the post-image survives. Commit notifications do not authorize deleting borrowed chains while older snapshots can still read them.
 
 This supersedes the M1 always-new-chain/exclusive-version ownership rule and the older sharing-check proposal. Acceptance does not establish implementation completion. See the [CBRD-27230 evidence entry](docs/reference/implementation-observations.md#cbrd-27230-update-chain-reuse) and [historical M1 flow](docs/reference/design-history.md#m1-update-and-vacuum).
 
 ### DELETE
 
-In MVCC mode, `heap_delete` sets the delete ID and writes the record back to the heap page. Retain stubs and their chains for older readers until vacuum. Do not Resolve OOS values in place: expansion may exceed the 16KB heap-page limit. The SA/non-MVCC eager path retains its separate cleanup role.
+In MVCC mode, `heap_delete` sets the delete ID and writes the record back to the heap page. Retain stubs and their chains for older readers until vacuum. Do not Resolve OOS values in place: expansion may exceed the 16KB heap-page limit. The SA/non-MVCC eager path records a reclaim intent that runs at commit.
 
 ---
 
@@ -254,6 +256,7 @@ In MVCC mode, `heap_delete` sets the delete ID and writes the record back to the
 4. **DELETE safety:** retain stubs and chains until vacuum can safely remove the row's last version. Do not Resolve OOS values in place during heap DELETE.
 5. **Replication completeness:** supply enough information for the replica to reconstruct equivalent values and correct **replica-local** references. Master and replica OOS OIDs may differ.
 6. **File association:** each heap file has at most one OOS file; its VFID is stored in the heap header.
+7. **No undo of OOS reclaim:** an OOS chunk delete is redo-only and runs only after the transaction or sysop that decided it commits ([ADR-0008](docs/adr/0008-reclaim-oos-chains-after-the-delete-is-final.md)). A slot it frees is reusable at once; no undo writes a deleted chunk back.
 
 ### Replication References
 
@@ -261,21 +264,20 @@ The replica performs its own `oos_insert` for newly written values and fixes the
 
 ### Vacuum + OOS
 
-In MVCC mode, UPDATE/DELETE retain chains needed by old readers; cleanup occurs only after visibility permits it. The accepted cleanup sources are committed UPDATE notifications for dropped chains and REMOVE for a row's last version. REMOVE deletes within the caller's sysop; notification cleanup uses atomic system operations. Chunk deletes are logged so a mid-delete failure/recovery rolls back or replays the appropriate atomic operation. The SA/non-MVCC eager path reclaims unreferenced chains synchronously and follows §2 diagnostic policy.
+In MVCC mode, UPDATE/DELETE retain chains needed by old readers; cleanup occurs only after visibility permits it. The accepted cleanup sources are committed UPDATE notifications for dropped chains and REMOVE for a row's last version; both run the OOS reclaimer. REMOVE removes the heap record and records the reclaim intent in one sysop; `log_sysop_commit` runs it. The reclaimer reads the chain from the head with the §2 identity checks, stops at the first absent, deallocated, retyped, or mismatching slot, and deletes from the tail with the head last, using redo-only records. After an error or a crash it reruns from the head until the chain is gone; it never drops an error while chunks remain. The SA/non-MVCC eager path records its intent at DML time, runs it at commit, and follows §2 diagnostic policy.
 
-Deleting a **chunk record** frees a slot. Reclaiming an empty **page** returns it to the file manager and is a separate requirement below. The old forward-walk implementation and its dates/functions live in [design history](docs/reference/design-history.md#m1-update-and-vacuum), with issue-specific progress in [CBRD-26668](docs/reference/implementation-observations.md#cbrd-26668-vacuum-integration) and [CBRD-27237](docs/reference/implementation-observations.md#cbrd-27237-rollback-and-vacuum).
+Deleting a **chunk record** frees a slot, which is reusable at once. Reclaiming an empty **page** returns it to the file manager and is a separate requirement below. The old forward-walk implementation and its dates/functions live in [design history](docs/reference/design-history.md#m1-update-and-vacuum), with issue-specific progress in [CBRD-26668](docs/reference/implementation-observations.md#cbrd-26668-vacuum-integration) and [CBRD-27237](docs/reference/implementation-observations.md#cbrd-27237-rollback-and-vacuum).
 
 ### Empty-Page Reclaim Invariant (CBRD-26786; accepted 2026-08-28)
 
 Every fully emptied OOS data page is reclaimed or reused before its file reserves a new sector: an OOS file reserves a new sector only when no safely reclaimable empty page exists **right now**. This is an invariant, including the SA/non-MVCC eager path; cache coverage or a best-effort vacuum optimization is insufficient. Returning a page while its file receives no allocation is **not** required ([ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), 2026-11-05): a deallocated page stays in the file's own sectors, so only the file's next allocation can use it. Tests check reuse before growth, not an idle page-count drop.
 
-Three mechanisms deliver the invariant:
+Two mechanisms deliver the invariant:
 
-- **Vacuum fast path:** after a committed delete batch and after unfixing the home heap page, feed candidate OOS pages once per heap-page batch to `oos_reclaim_empty_pages`. Use a two-phase check to revalidate emptiness before deallocation. Identity repair refines the candidate list to pages actually emptied by deletion, each reported once. Freeing chunks does not itself free their pages.
-- **LSA reclaim gate:** for each reclaim call, sample the horizon as the minimum head LSA of active regular transactions and active system tdes, clamped to the pre-scan append LSA. Deallocate an empty page only when its page LSA is older. Otherwise classify it **deferred**: abort by a still-active deleter may need to undo chunk deletes into that page. It becomes reclaimable when the writer finishes.
-- **Growth-gate sweep:** at the file's single growth point (`oos_alloc_page_with_reclaim`), use a per-VFID, non-evicting in-memory side map `{pending_deletes, swept_this_boot, sweep_cursor}` under the bestspace mutex. The pending-delete counter records deletes not yet accounted for by a completed sweep lap; only zero/non-zero matters. Pending deletes, or the boot rule after lost hints, arm an incremental sector-bitmap sweep (`oos_reclaim_sweep_step`) resumed from the saved cursor. Stop at the first reclaimed page, which the following `file_alloc` immediately reuses. A lap reclaiming nothing settles the counter; deferred pages keep it armed while growth proceeds. Hint loss costs one boot-rule lap, never a page; bitmap and on-disk emptiness are authoritative.
+- **Vacuum fast path:** after the reclaimer deletes a chain, feed the pages it emptied, each once, to `oos_reclaim_empty_pages`. Use a two-phase check to revalidate emptiness before deallocation. Freeing chunks does not itself free their pages.
+- **Growth-gate sweep:** at the file's single growth point (`oos_alloc_page_with_reclaim`), use a per-VFID, non-evicting in-memory side map `{pending_deletes, swept_this_boot, sweep_cursor}` under the bestspace mutex. The pending-delete counter records deletes not yet accounted for by a completed sweep lap; only zero/non-zero matters. Pending deletes, or the boot rule after lost hints, arm an incremental sector-bitmap sweep (`oos_reclaim_sweep_step`) resumed from the saved cursor. Stop at the first reclaimed page, which the following `file_alloc` immediately reuses. A lap reclaiming nothing settles the counter. Hint loss costs one boot-rule lap, never a page; bitmap and on-disk emptiness are authoritative.
 
-The [ADR-0001 non-numerable enumeration contract](#best-page-policy-3-tier-bestspace--cbrd-26658) is the prerequisite. Revision-specific PR evidence and historical implementation caveats are maintained under [CBRD-26786](docs/reference/implementation-observations.md#cbrd-26786-empty-page-reclaim).
+No LSA reclaim gate defers an empty page: ADR-0008 removed its only reason, the undo of chunk deletes into that page. The removed rule is kept in [design history](docs/reference/design-history.md#reclaim-before-adr-0008). The [ADR-0001 non-numerable enumeration contract](#best-page-policy-3-tier-bestspace--cbrd-26658) is the prerequisite. Revision-specific PR evidence and historical implementation caveats are maintained under [CBRD-26786](docs/reference/implementation-observations.md#cbrd-26786-empty-page-reclaim).
 
 ---
 
@@ -312,5 +314,6 @@ The accepted OOS design uses separate value chains per attribute and has no OOS-
 - Keep **Expand** (record), **Resolve** (attribute), and **Read** (storage) distinct. Avoid “bulk externalization” for accepted demotion, “indexed/ordered file” for numerable, “full scan/refill” for bestspace sync, “data-sector scan” for sector-bitmap walk, and “full sweep” for cursor-resumed reclaim.
 - Describe the gate as the **PG-style four-record heap target**, derived by `heap_oos_inline_target_size()` independently of unfill; state eligibility as `> OR_OOS_INLINE_SIZE` (24B). Former `DB_PAGESIZE/8`/512B and raw quarter-page rules are historical.
 - Use the accepted [UPDATE ownership invariant](#update-ownership-and-chain-reuse-cbrd-27230); label exclusive-version ownership as historical M1.
+- Use **reclaim intent** for the postponed decision and **OOS reclaimer** for the redo-only deletion; neither is a rollback or an undoable cleanup sysop.
 - Add a space between inline code and Korean text: `` `oos_read` 는 ``.
 - Label implementation, proposal, and history; accepted design does not establish implementation or merge completion. Cite dated observations for progress claims.

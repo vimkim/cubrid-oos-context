@@ -1,6 +1,6 @@
 # OOS design history and proposals
 
-Last updated: 2026-10-27 (document modification).
+Last updated: 2026-11-03 (document modification).
 
 Read when explaining an earlier behavior, milestone, alternative, or optimization proposal. This file is **non-normative**. Material moved from `OOS-CONTEXT.md` at repository commit `0eab7df` retains its source dates; unpinned descriptions are historical context, not current implementation claims. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md).
 
@@ -15,6 +15,7 @@ Read when explaining an earlier behavior, milestone, alternative, or optimizatio
 | 2026-09-22 (ADR-0005) | ADR-0004 durable-history implementation direction and activation/compatibility contract | Complete deferral from PR #7990 / 11.5 and reopened design; [release scope](../../OOS-CONTEXT.md#cdcflashback-deferred-from-the-115-merge) |
 | 2026-10-27 (ADR-0006; amends ADR-0005) | ADR-0005 recreate rule as policy only: pre-stamp databases passed boot, then hit page-type asserts (debug) or were misread (release); `PAGE_OOS` inserted mid-enum | Boot-time volume-header storage-format stamp check, equality required; page types append-only; [§5](../../OOS-CONTEXT.md#storage-format-boot-check-adr-0006) |
 | 2026-10-27 (ADR-0007; partially supersedes ADR-0005) | Keep `cbrd_27064`/`cbrd_27075` enabled and visibly failing in PR CI | Disabled on `develop` CI, kept in the QA regression until CBRD-26939; [release scope](../../OOS-CONTEXT.md#cdcflashback-deferred-from-the-115-merge) |
+| 2026-11-03, proposed (ADR-0008) | REMOVE and notification cleanup delete chunks with undo inside a sysop and roll back on failure; SA/non-MVCC eager cleanup deletes with undo inside the user transaction; `RVOOS_NOTIFY_VACUUM` from a commit hook before `logtb_complete_mvcc`; LSA reclaim gate; 24B chunk header whose next link holds only an OID | Reclaim after finality: postponed reclaim intents, a redo-only reclaimer that reruns until done, postpone notification consumed after older snapshots end, 32B header with the next-chunk stamp, no LSA gate; [§4](../../OOS-CONTEXT.md#vacuum--oos) and [rules before ADR-0008](#reclaim-before-adr-0008) |
 
 The largest-first rule survived the gate and stub-size changes. The old >16B floor is historical; accepted eligibility uses the 24B stub. `STORAGE PREFER_INLINE` is accepted merge scope, not the older “proposed” label; its implementation evidence belongs under [CBRD-26912](implementation-observations.md#cbrd-26912-inline-preference).
 
@@ -62,6 +63,17 @@ In the recorded M1 MVCC implementation, DELETE/UPDATE did not clean OOS value ch
 3. **Eager (non-MVCC / SA_MODE)** — `heap_oos_delete_unreferenced` (`heap_oos.cpp:425`): single-process mode has no vacuum, so old value chains are deleted synchronously at UPDATE time, comparing old and new head OOS OIDs to keep any chain the post-image still references.
 
 The 2026-06-02 correction established that undo contains stubs, not expanded values. That representation remains required, while using the undo image as an OOS deletion source is superseded. The rollback data-loss evidence and repair status belong in the [CBRD-27237 entry](implementation-observations.md#cbrd-27237-rollback-and-vacuum).
+
+## Reclaim before ADR-0008
+
+These rules were normative in `OOS-CONTEXT.md` at context commit `281a940`. [ADR-0008](../adr/0008-reclaim-oos-chains-after-the-delete-is-final.md), proposed on 2026-11-03 and confirmed by the team lead before this revision merges, replaces them. They describe the code at `feature/oos-merge` `dcbf09e4f`; the [ADR-0008 observation](implementation-observations.md#adr-0008-reclaim-after-finality) records that gap.
+
+- **Vacuum + OOS.** "REMOVE deletes within the caller's sysop; notification cleanup uses atomic system operations. Chunk deletes are logged so a mid-delete failure/recovery rolls back or replays the appropriate atomic operation. The SA/non-MVCC eager path reclaims unreferenced chains synchronously and follows §2 diagnostic policy."
+- **UPDATE notification (§3 step 3).** "For committed UPDATEs, emit `RVOOS_NOTIFY_VACUUM` from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs." A notification flushed before the commit record survives a crash that rolls the UPDATE back; the [CBRD-27237 deep dive](../../../my-cubrid-docs/cbrd-27237/CBRD-27237-fix-options-deep-dive_dcbf09e_claude.md) calls this the window before commit.
+- **LSA reclaim gate.** "For each reclaim call, sample the horizon as the minimum head LSA of active regular transactions and active system tdes, clamped to the pre-scan append LSA. Deallocate an empty page only when its page LSA is older. Otherwise classify it **deferred**: abort by a still-active deleter may need to undo chunk deletes into that page. It becomes reclaimable when the writer finishes." The growth-gate sweep kept deferred pages armed while growth proceeded.
+- **Chunk layout.** The 24-byte header held `total_data_length`, `chunk_index`, the next-chunk OID, and the chunk's own `identity_stamp`. "Insert redo/delete undo restore the stored stamp from the logged image."
+
+The physical undo of chunk deletes into the same slot is what CBRD-27781 overwrites; the gate protected page deallocation but not slot reuse on a page that refilled.
 
 ## Storage design background
 

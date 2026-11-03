@@ -129,6 +129,22 @@ Source verified 2026-10-27 at PR #7990 head `dcbf09e4f7fd02ff9c8fc6493ec8887fc29
 
 The author's verification on 2026-10-27, recorded in the [review workspace](../../../../temp/pr7990-review-5662427700/TODO.md), reports: on a database created by a `develop` debug build, the pre-guard PR engine aborted on the page-type assert in `pgbuf_check_page_ptype_internal`; with the guard, `csql -S`, `checkdb`, `upgradedb`, and server start were refused with -1392, and `deletedb` succeeded; ctest 42/42 passed, including `test_oos_storage_format_guard`, built from `1e8701b4f` plus the then-uncommitted review repair. These runs predate head `dcbf09e` and were not repeated for this documentation change.
 
+## ADR-0008: Reclaim after finality
+
+No issue key. Required behavior: canonical [§2](../../OOS-CONTEXT.md#multi-chunk-oos-chain), [§3](../../OOS-CONTEXT.md#update-ownership-and-chain-reuse-cbrd-27230), and [§4](../../OOS-CONTEXT.md#vacuum--oos), proposed by [ADR-0008](../adr/0008-reclaim-oos-chains-after-the-delete-is-final.md) on 2026-11-03 and pending the team lead's confirmation.
+
+Source verified 2026-11-03 at `feature/oos-merge` `dcbf09e4f7fd02ff9c8fc6493ec8887fc2919d67`. The code follows the [rules before ADR-0008](design-history.md#reclaim-before-adr-0008), not the proposed design:
+
+| ADR-0008 requirement | Observation at `dcbf09e4f` |
+| --- | --- |
+| A chunk delete has no undo | `oos_log_delete_physical` appends `RVOOS_DELETE` with the whole record as undo (`src/storage/oos_file.cpp:3221`); its undo `oos_rv_redo_insert` writes it back with `spage_insert_for_recovery` |
+| Reclaim intents and the reclaimer | `vacuum_heap_record` deletes chunks inside its sysop through `vacuum_heap_oos_delete_within_sysop`; the forward-walk deletes inside `vacuum_forward_walk_oos_delete_atomic`; eager cleanup calls `oos_delete` inside the user transaction |
+| Postpone notification | `RVOOS_NOTIFY_VACUUM` has no emitter or consumer (`src/transaction/recovery.h:206-209`); the forward-walk is called from `vacuum_process_log_block` (`src/query/vacuum.c:3619`, `:3764`) |
+| Next link with stamp, continuation fix tolerant of deallocation | 24B header; `oos_delete_chain` compares only the head stamp (`oos_file.cpp:3346-3352`) and fixes continuation pages with plain `pgbuf_fix` (`:3305`) |
+| No LSA reclaim gate | The gate is implemented (`oos_reclaim_lsa_gate_passes`, `oos_file.cpp:1516`) |
+
+The remote head had moved to `f67f2f692` when this entry was written; that head was not reverified. Design evidence is model-only: [decision checks](../../../my-cubrid-docs/oos/reclaim-decisions.md) at documentation commit `554356e` (137 TLC checks). No engine change, build, or performance measurement exists for this decision yet.
+
 ## Other carried observations
 
 These distinct entries have no verification date/exact engine head recorded in context `0eab7df`:
