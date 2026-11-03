@@ -29,6 +29,7 @@ The existing mechanisms cover assumption 1 in separate places: latch retention, 
    - REMOVE removes the heap record and records the intent in one sysop; `log_sysop_commit` runs it.
    - SA/non-MVCC eager cleanup records the intent during the DML; it runs at transaction commit.
 2. **UPDATE notification through a postpone (A').** An UPDATE records the chains it drops in a postpone. A statement or savepoint rollback cancels that postpone. The postpone runs after `LOG_COMMIT_WITH_POSTPONE` and appends `RVOOS_NOTIFY_VACUUM`; restart recovery reruns it when that record is durable. Vacuum consumes the notification only when no active snapshot is older than the UPDATE's commit, then runs the reclaimer. The undo-image forward-walk deletion path is removed, as §3 already required.
+   - **Open at confirmation: B3 in place of A'.** The 2026-11-04 review recommends B3, an undoable MVCC mark on the dropped chain's head, and asks the confirmation meeting to choose between A' and B3 (see Considered options). A' needs a log path the engine does not have: an MVCC log record requires a valid transaction MVCCID (`log_append.cpp:966-971`), and commit clears it in `logtb_complete_mvcc` (`log_manager.c:5267`) before postpones run (`5285`). If B3 is chosen, this decision, §3 step 3, and the chunk layout are revised before acceptance.
 3. **The reclaimer converges on rerun.** It reads the chain from the head, compares the head stamp with the intent and each next chunk's stamp with the stamp stored in the link, and stops at the first absent, deallocated, retyped, or mismatching slot. It deletes from the tail and the head last. After an error or a crash it reruns from the head until the chain is gone. An error must not end a reclaim while chunks remain; whether the engine fails stop or re-queues the intent is left to the implementation. Continuation pages are fixed as possibly deallocated, like the head page.
 4. **The next link carries the next chunk's stamp.** The chunk header grows from 24B to 32B: `total_data_length`, `chunk_index`, next-chunk OID, next-chunk identity stamp, own identity stamp. Insertion runs tail first, so the stamp is known when the link is written.
 5. **The LSA reclaim gate is removed.** Its only stated reason was that an unfinished deleter could undo chunk deletes into an empty page. That cannot happen once chunk deletes have no undo. The vacuum fast path and the growth-gate sweep stay.
@@ -58,7 +59,22 @@ Each option was checked with TLC; a failing option is listed with its counterexa
 | | Tail first, link stamps, error dropped | The reclaim stops with chunks left |
 | | **Tail first, link stamps, rerun (chosen)** | Possible |
 
-A combined model of the chosen design, with an MVCC snapshot reader, an UPDATE that keeps its chain, page deallocation without a gate, and a crash or reclaimer error, passed every property. Each variant that undoes one decision failed its own property.
+The 2026-11-04 review added nine more options. B2, B3, and B4 were checked with TLC in the same models; the others were judged from engine source and this specification.
+
+| Decision | Option | Result |
+| --- | --- | --- |
+| Deciding that an UPDATE dropped a chain | B3: the UPDATE writes its delete MVCCID into the dropped chain's head with an undoable MVCC log record; vacuum decides as it does for heap records | Possible; vacuum must still wait for older snapshots. Rests on the engine's order: abort undoes every change before `logtb_complete_mvcc`, and vacuum processes a block only below the oldest visible MVCCID. Costs a head-page write and one MVCC record per dropped chain on UPDATE, a new recovery index, a vacuum dispatch branch, and an 8B delete MVCCID in the head. Recommended over A', subject to the UPDATE latency check of decision 7 |
+| | B4: as B, and the UPDATE's undo record has no compensation record | Possible in the model. Vacuum blocks carry only undo-bearing MVCC records, not compensation records, so vacuum would need a new log lookup |
+| | B6: the commit postpone reclaims the chain directly, without vacuum | Fails: a snapshot taken before the commit reads the reclaimed chain. Valid only for eager cleanup, where no concurrent reader exists |
+| Recording the REMOVE intent | **Postpone in the vacuum sysop (chosen)** | Possible |
+| | B2: reclaim the chains first, then remove the heap record, with no postpone | The model's reader and slot properties hold, but a heap record that still exists names a partly reclaimed chain. A crash leaves that state, and a release-build vacuum error marks the block done, so it stays. NULL-snapshot readers such as `btree_load` read it and fail with `ER_HEAP_OOS_CORRUPTED_RECORD` |
+| | B5: a persistent reclaim list in the OOS file | Same meaning as A' or B3, depending on when the entry is written; adds storage and recovery code |
+| Storage layout | C1: one page per chain, freed with `file_dealloc` | Removes slot reuse, because `file_dealloc` already postpones. A value just above 24B can occupy a whole page |
+| | C2: never reinsert into a page; free only empty pages | Removes slot reuse. One live chunk pins a page, compaction would change OIDs that log undo images name, and page reclaim still meets undo |
+| | C3: logical chunk IDs with a location map | Removes all three assumptions, at the cost of a map lookup per read, map recovery, and a much larger format change |
+| | C4: overwrite the chain in place and keep the old value in undo | Puts whole values back into undo, against decision 7 |
+
+A combined model of the chosen design, with an MVCC snapshot reader, an UPDATE that keeps its chain, page deallocation without a gate, and a crash or reclaimer error, passed every property. Each variant that undoes one decision failed its own property. With B3 in place of A', the combined model passed the same properties; with B2 in place of the REMOVE postpone, it failed only the property that an existing heap record names an intact chain.
 
 ## Consequences
 
@@ -70,10 +86,11 @@ A combined model of the chosen design, with an MVCC snapshot reader, an UPDATE t
 
 ## Evidence
 
-Models and results are in the documentation repository at commit `554356e`:
+Models and results are in the documentation repository at commit `536ee49` (branch `docs/oos-reclaim-alternatives`; the 2026-11-03 results are at `554356e`):
 
 - [Redesign report](../../../my-cubrid-docs/oos/reclaim-redesign.md): assumptions, defect mapping, D3 design, performance discussion, and the U1 model result (80 checks).
-- [Decision checks](../../../my-cubrid-docs/oos/reclaim-decisions.md): per-decision models, the combined model, counterexamples, the state invariants that explain each passing option, and witnesses (137 checks).
+- [Decision checks](../../../my-cubrid-docs/oos/reclaim-decisions.md): per-decision models, the combined model, counterexamples, the state invariants that explain each passing option, witnesses, and the review of the remaining alternatives (208 checks).
+- [Engine facts for B2 and B3](../../../my-cubrid-docs/oos/reclaim-engine-facts.md): vacuum's commit decision, which log records reach vacuum, duplicate vacuum jobs, readers without a snapshot, UPDATE's handling of the old chain, and restart reruns, with file:line citations at `dcbf09e4f`.
 - Models and runners: `my-cubrid-docs/oos/reclaim-model/` (`OosReclaim.tla`, `OosSpaceProtect.tla`, `OosDropDecision.tla`, `OosReclaimRetry.tla`, `OosReclaimDesign.tla`, `run.py`, `check_decisions.py`).
 - [CBRD-27237 fix-options deep dive](../../../my-cubrid-docs/cbrd-27237/CBRD-27237-fix-options-deep-dive_dcbf09e_claude.md): the A' recommendation and the commit-hook crash window.
 
