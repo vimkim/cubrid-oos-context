@@ -15,7 +15,7 @@ Keep all required behavior in this canonical file and read it completely when th
 | Explaining a superseded rule, earlier milestone, alternative, or optimization proposal | [Design history](docs/reference/design-history.md): non-normative snapshots and proposals |
 | Preparing test data or choosing regression coverage | [Test recipes](docs/reference/test-recipes.md): examples and scenarios, with expectations derived from this specification |
 | Discussing CDC/flashback historical images | [Historical-value vocabulary](CONTEXT.md), [ADR-0004](docs/adr/0004-durable-oos-supplemental-images.md), [ADR-0005](docs/adr/0005-defer-oos-history-from-the-11-5-merge.md), and [ADR-0007](docs/adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md); apply the release scope in §5 |
-| Needing rationale for page enumeration, LOB eligibility, Expand, or the boot storage-format check | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), or [ADR-0006](docs/adr/0006-reject-pre-stamp-databases-at-boot.md), respectively |
+| Needing rationale for page enumeration, LOB eligibility, Expand, the boot storage-format check, or idle empty-page return | [ADR-0001](docs/adr/0001-oos-page-enumeration-non-numerable.md), [ADR-0002](docs/adr/0002-oos-lob-locator-demotion.md), [ADR-0003](docs/adr/0003-oos-expansion-is-opt-in.md), [ADR-0006](docs/adr/0006-reject-pre-stamp-databases-at-boot.md), or [ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), respectively |
 
 The reference documents contain evidence and rationale. They do not add hidden requirements or replace a complete read of this file. Historical text in a linked report is interpreted under the accepted requirements here.
 
@@ -267,7 +267,7 @@ Deleting a **chunk record** frees a slot. Reclaiming an empty **page** returns i
 
 ### Empty-Page Reclaim Invariant (CBRD-26786; accepted 2026-08-28)
 
-Every fully emptied OOS data page is eventually returned to the file manager. An OOS file reserves a new sector only when no safely reclaimable empty page exists **right now**. This is an invariant, including the SA/non-MVCC eager path; cache coverage or a best-effort vacuum optimization is insufficient.
+Every fully emptied OOS data page is reclaimed or reused before its file reserves a new sector: an OOS file reserves a new sector only when no safely reclaimable empty page exists **right now**. This is an invariant, including the SA/non-MVCC eager path; cache coverage or a best-effort vacuum optimization is insufficient. Returning a page while its file receives no allocation is **not** required ([ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), 2026-11-05): a deallocated page stays in the file's own sectors, so only the file's next allocation can use it. Tests check reuse before growth, not an idle page-count drop.
 
 Three mechanisms deliver the invariant:
 

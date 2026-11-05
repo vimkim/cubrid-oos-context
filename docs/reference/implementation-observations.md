@@ -43,6 +43,8 @@ Observation recorded 2026-08-28: PR #7617 head `8ba9b5398` implemented the accep
 
 The later identity repair refined touched-page candidates to actually emptied pages, once each; its report says reclaim gates/sweep/deallocation were unchanged. Read the [CBRD-26950 entry](#cbrd-26950-identity-stamp-repair) for that report's date/head. Neither snapshot proves today's integration state.
 
+Observation 2026-11-05 under [ADR-0009](../adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md): CBRD-26659 testcases `churn_abort_retry`, `churn_insert_delete`, `churn_insert_update_delete`, `churn_restart`, and `snapshots_reclaim` (private-ex `tc/pr-8128`, disabled under `disabled/`) failed at engine `e3589ae42` and testcase `01df2600a` on a 20-second idle page-count drop, which ADR-0009 no longer requires. Their oracle is being changed to reuse before growth; no native run of the changed oracle exists yet. At `feature/oos-merge` `d52b1889e`, only `file_destroy` and the `file_create` failure path release a permanent file's sectors.
+
 ## CBRD-26831: Page enumeration
 
 Observation 2026-07-02: `oos-m2-all-plans-experimental` created `FILE_OOS` with `is_numerable=false` and converted sync/stats to `oos_collect_data_page_vpids` with `OLD_PAGE_MAYBE_DEALLOCATED` plus a `PAGE_OOS` type check. ADR-0001's skipped-page counter was not yet added; testcase verification/merge was pending. No exact experimental head was recorded. OOS had been numerable through `4ddbc7c`.
