@@ -1,7 +1,7 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for required CUBRID OOS behavior.
-> Last updated: 2026-10-27 (document modification only). Implementation observations carry their own evidence dates and revisions.
+> Last updated: 2026-11-05 (document modification only). Implementation observations carry their own evidence dates and revisions.
 
 ## Authority and reading paths
 
@@ -58,7 +58,7 @@ OOS separates large variable-length attribute values from heap records into a de
 At INSERT/UPDATE, `heap_attrinfo_determine_disk_layout` applies an incremental demotion policy:
 
 1. **Record gate:** demote only when `header_size + payload_size + mvcc_extra > heap_oos_inline_target_size()`. Use the same target for the trigger and stop.
-2. **Eligibility:** `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than **24B**). Demotion must shrink the value's representation. This is type-agnostic, including BLOB/CLOB **locator bytes**; the external LOB payload stays in the LOB subsystem. The OOS serialization path preserves inline-path `db_elo_copy_with_prefix` semantics before writing the locator (ADR-0002).
+2. **Eligibility:** `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than **24B**), excluding `STORAGE FORCE_INLINE` columns (below). Demotion must shrink the value's representation. This is type-agnostic, including BLOB/CLOB **locator bytes**; the external LOB payload stays in the LOB subsystem. The OOS serialization path preserves inline-path `db_elo_copy_with_prefix` semantics before writing the locator (ADR-0002).
 3. **Order and stop:** consider ordinary candidates before `STORAGE PREFER_INLINE` candidates (§ below); within each group sort by size descending. Demote one at a time, subtracting `column_size` and adding 24B. Stop when the record is at or below the target or candidates are exhausted. Smaller eligible values may remain inline.
 4. **Exhausted candidates:** a record may remain above the target. Keep selected values OOS-backed and apply the OOS+bigone guard below. With no candidates and no retained stubs, `has_oos` stays false; an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid.
 
@@ -88,9 +88,24 @@ Four target-sized records fit: `4 × (4,060 + 4) = 16,256 ≤ 16,268`. The next 
 
 **Conservative estimate:** compare using pre-loop `header_size`, recomputed once after demotion. Payload decreases and the header cannot grow, so this is an overestimate: at a VOT BYTE↔SHORT↔INT boundary the loop may over-demote by at most one value, but cannot under-demote relative to that estimate. The final guard still requires a valid slotted-page record or rejection. Worked examples are in [test recipes](docs/reference/test-recipes.md#demotion-worked-examples); former gate/floor values are in [history](docs/reference/design-history.md#supersession-timeline).
 
-### Per-column inline preference (CBRD-26912)
+### Per-column STORAGE policy (CBRD-26912, CBRD-27259)
 
-`STORAGE PREFER_INLINE` is an accepted soft hint for the CUBRID 11.5 OOS merge. Its values remain eligible but sort after ordinary candidates, descending by size within each group; demote them as a last resort when necessary. Store the setting in `SM_ATTFLAG_OOS_PREFER_INLINE`; its sole storage-policy effect is the primary sort key in `heap_attrinfo_determine_disk_layout`. Apply the ordinary OOS+bigone guard afterward.
+`STORAGE` applies only to normal attributes of a class; CLASS, SHARED, and VCLASS attributes reject every clause (CBRD-26979). A column persists at most one policy flag (`SM_ATTFLAG_OOS_STORAGE_MASK`). A fixed type is never demoted, so `DEFAULT` and `FORCE_INLINE` both name its default, persist nothing, and print no DDL clause.
+
+| Clause | Variable type | Fixed type |
+|---|---|---|
+| `DEFAULT`, `PREFER_OUTLINE` | No flag: ordinary candidate | `DEFAULT` accepted; `PREFER_OUTLINE` rejected |
+| `PREFER_INLINE` | `SM_ATTFLAG_OOS_PREFER_INLINE` | Rejected |
+| `FORCE_INLINE` | `SM_ATTFLAG_OOS_FORCE_INLINE` | Accepted, no flag |
+| `FORCE_OUTLINE` | `SM_ATTFLAG_OOS_FORCE_OUTLINE` | Rejected |
+
+- **`PREFER_INLINE`** is an accepted soft hint for the CUBRID 11.5 OOS merge. Its values remain eligible but sort after ordinary candidates, descending by size within each group; demote them as a last resort. Its sole storage-policy effect is the primary sort key in `heap_attrinfo_determine_disk_layout`.
+- **`FORCE_INLINE`** (accepted 2026-11-05) forbids demotion: its values are never candidates. A record kept large by them stays inline or becomes non-OOS `REC_BIGONE`. If other values were demoted and the record still needs `REC_BIGONE`, the OOS+bigone guard rejects the write. Never ignore `FORCE_INLINE` to avoid that rejection.
+- **`FORCE_OUTLINE`** has no accepted placement rule here; its implemented behavior is under [CBRD-26067](docs/reference/implementation-observations.md#cbrd-26067-forced-outline).
+
+Every policy is followed by the ordinary OOS+bigone guard.
+
+**Policy changes (accepted 2026-11-05):** ALTER does not relocate stored values; a policy applies when a write lays out the record. `MODIFY`/`CHANGE` without a `STORAGE` clause keeps the policy while the new type is variable and drops it for a fixed type; a later change back to a variable type does not restore it. An explicit fixed-type `DEFAULT` or `FORCE_INLINE` clears any flag. **Open:** under §3 chain reuse, whether an UPDATE that does not assign a `FORCE_INLINE` column keeps a stub demoted before the policy change. Decide when CBRD-27230 is implemented; the 2026-11-05 inclination is to change such stubs as little as possible.
 
 ### OOS + bigone Rejection (CBRD-26937)
 

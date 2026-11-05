@@ -1,6 +1,6 @@
 # OOS implementation observations
 
-Last updated: 2026-11-03 (document modification).
+Last updated: 2026-11-05 (document modification).
 
 Read when comparing an engine/PR with requirements, diagnosing an issue, or checking progress. This file is **non-normative** and maintains one observation entry per issue. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md). Evidence dates/revisions below are independent of the modification date; reverify source/PR state or JIRA before making current claims. No snapshot establishes today's merge status.
 
@@ -53,9 +53,23 @@ Later integration evidence belongs to [CBRD-26786](#cbrd-26786-empty-page-reclai
 
 Snapshot dated 2026-09-22, carried in context `0eab7df`: draft PR #7462 implemented the physical target for trigger/stop, excluded `PRM_ID_HF_UNFILL_FACTOR`, and added target/boundary/unfill-independence coverage. PR #7990 head `7008beee0` on `feature/oos-merge` still used raw `DB_PAGESIZE/4`; that implementation was not integrated. JIRA was recorded Resolved/Fixed despite the draft remaining open/dirty; no draft head was recorded. Workflow state does not prove integration. Required formula: canonical §1.
 
+Source verified 2026-11-05 at `feature/oos-merge` `d52b1889e`: `heap_attrinfo_determine_disk_layout` still compares the record with `DB_PAGESIZE / 4` for the trigger and the stop.
+
 ## CBRD-26912: Inline preference
 
 Record dated 2026-09-22, added to context 2026-10-08: `STORAGE PREFER_INLINE` is accepted 11.5 merge scope. The context records PR #7334 merged into `feat/oos` as `4523843d1` on 2026-06-29 and JIRA Resolved/Fixed for target `guava`. This corrects “proposed — NOT yet merged.” It is a carried merge/workflow observation, not a new live lookup; required behavior is canonical §1.
+
+## CBRD-27259: Forced inline storage
+
+Implemented 2026-11-05 as commit `e19d8c613` on branch `CBRD-27259-storage-force-inline`, based on `feature/oos-merge` `d52b1889e`. On that date no PR existed and the commit was not integrated. Required behavior is canonical [§1](../../OOS-CONTEXT.md#per-column-storage-policy-cbrd-26912-cbrd-27259).
+
+At that commit, `heap_attrinfo_determine_disk_layout` leaves `OR_ATTRIBUTE_OOS_STORAGE_FORCE_INLINE` values out of the demotion candidates. `do_resolve_oos_storage_flag` maps the clause and the column type to the persisted flag for CREATE, ADD, MODIFY, and CHANGE. Chain reuse (CBRD-27230) is not implemented there, so every UPDATE lays out all values again.
+
+The author's debug-build run on 2026-11-05 passed `test_oos_sql_storage` (40 tests) and all 13 OOS SQL GoogleTest binaries (175 tests). An SA `unloaddb`/`loaddb` round trip kept the `FORCE_INLINE` clause and kept an 8000B `FORCE_INLINE` value inline after load. HA replication and crash recovery were not run.
+
+## CBRD-26067: Forced outline
+
+Source verified 2026-11-05 at `feature/oos-merge` `d52b1889e`: `STORAGE FORCE_OUTLINE` persists `SM_ATTFLAG_OOS_FORCE_OUTLINE`. `heap_attrinfo_determine_disk_layout` selects every non-NULL `FORCE_OUTLINE` value larger than 24B before the record gate, then demotes the remaining candidates as usual. A cached JIRA lookup shows CBRD-26067 Resolved; this was not a live lookup. Canonical §1 records no accepted placement rule for this option.
 
 ## CBRD-26830: TDE
 
