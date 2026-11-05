@@ -67,6 +67,8 @@ At that commit, `heap_attrinfo_determine_disk_layout` leaves `OR_ATTRIBUTE_OOS_S
 
 The author's debug-build run on 2026-11-05 passed `test_oos_sql_storage` (40 tests) and all 13 OOS SQL GoogleTest binaries (175 tests). An SA `unloaddb`/`loaddb` round trip kept the `FORCE_INLINE` clause and kept an 8000B `FORCE_INLINE` value inline after load. HA replication and crash recovery were not run.
 
+Commit `aa951eebf` (2026-11-05, local, after the PR #8416 head `e19d8c613`) adds the non-OOS `REC_BIGONE` warning `ER_HEAP_BIGONE_WITHOUT_OOS` (-1393 at that commit) in `heap_attrinfo_transform_to_disk_internal`, right after the OOS+bigone rejection. `heap_oos_warn_bigone_without_oos` sets it between `er_stack_push` and `er_stack_pop`. The author's debug-build run passed all 13 OOS SQL GoogleTest binaries (178 tests, 43 in `test_oos_sql_storage`). In an SA scratch database, a 17000B `BIT(136000)` insert logged nothing by default and logged one -1393 warning with `error_log_warning=yes`; an OOS-backed 17000B insert logged none.
+
 ## CBRD-26067: Forced outline
 
 Source verified 2026-11-05 at `feature/oos-merge` `d52b1889e`: `STORAGE FORCE_OUTLINE` persists `SM_ATTFLAG_OOS_FORCE_OUTLINE`. `heap_attrinfo_determine_disk_layout` selects every non-NULL `FORCE_OUTLINE` value larger than 24B before the record gate, then demotes the remaining candidates as usual. This matches the CBRD-26067 issue's target behavior, whose 16B stub size is superseded by the 24B stub. A cache-first JIRA lookup on 2026-11-05 showed CBRD-26067 Resolved/Fixed for `guava`. The behavior became an accepted requirement in canonical [§1](../../OOS-CONTEXT.md#per-column-storage-policy-cbrd-26912-cbrd-26067-cbrd-27259) on 2026-11-05.
