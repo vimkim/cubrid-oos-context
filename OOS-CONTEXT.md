@@ -272,7 +272,7 @@ Deleting a **chunk record** frees a slot, which is reusable at once. Reclaiming 
 
 ### Empty-Page Reclaim Invariant (CBRD-26786; accepted 2026-08-28)
 
-Every fully emptied OOS data page is reclaimed or reused before its file reserves a new sector: an OOS file reserves a new sector only when no safely reclaimable empty page exists **right now**. This is an invariant, including the SA/non-MVCC eager path; cache coverage or a best-effort vacuum optimization is insufficient. Returning a page while its file receives no allocation is **not** required ([ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), 2026-11-05): a deallocated page stays in the file's own sectors, so only the file's next allocation can use it. Tests check reuse before growth, not an idle page-count drop.
+Every fully emptied OOS data page is reclaimed or reused before its file reserves a new sector: an OOS file reserves a new sector only when no safely reclaimable empty page exists **right now**. This is an invariant, including the SA/non-MVCC eager path; cache coverage or a best-effort vacuum optimization is insufficient. Returning a page while its file receives no allocation is **not** required ([ADR-0009](docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md), 2026-11-05): a deallocated page stays in the file's own sectors, so only the file's next allocation can use it. Tests check reuse before growth within a small page allowance, not an idle page-count drop.
 
 Two mechanisms deliver the invariant:
 
