@@ -61,7 +61,7 @@ Record dated 2026-09-22, added to context 2026-10-08: `STORAGE PREFER_INLINE` is
 
 ## CBRD-27259: Forced inline storage
 
-Implemented 2026-11-05 as commit `e19d8c613` on branch `CBRD-27259-storage-force-inline`, based on `feature/oos-merge` `d52b1889e`. On that date no PR existed and the commit was not integrated. Required behavior is canonical [§1](../../OOS-CONTEXT.md#per-column-storage-policy-cbrd-26912-cbrd-27259).
+Implemented 2026-11-05 as commit `e19d8c613` on branch `CBRD-27259-storage-force-inline`, based on `feature/oos-merge` `d52b1889e`. Draft PR #8416 opened the same day; the commit was not integrated then. Required behavior is canonical [§1](../../OOS-CONTEXT.md#per-column-storage-policy-cbrd-26912-cbrd-26067-cbrd-27259).
 
 At that commit, `heap_attrinfo_determine_disk_layout` leaves `OR_ATTRIBUTE_OOS_STORAGE_FORCE_INLINE` values out of the demotion candidates. `do_resolve_oos_storage_flag` maps the clause and the column type to the persisted flag for CREATE, ADD, MODIFY, and CHANGE. Chain reuse (CBRD-27230) is not implemented there, so every UPDATE lays out all values again.
 
@@ -69,7 +69,7 @@ The author's debug-build run on 2026-11-05 passed `test_oos_sql_storage` (40 tes
 
 ## CBRD-26067: Forced outline
 
-Source verified 2026-11-05 at `feature/oos-merge` `d52b1889e`: `STORAGE FORCE_OUTLINE` persists `SM_ATTFLAG_OOS_FORCE_OUTLINE`. `heap_attrinfo_determine_disk_layout` selects every non-NULL `FORCE_OUTLINE` value larger than 24B before the record gate, then demotes the remaining candidates as usual. A cached JIRA lookup shows CBRD-26067 Resolved; this was not a live lookup. Canonical §1 records no accepted placement rule for this option.
+Source verified 2026-11-05 at `feature/oos-merge` `d52b1889e`: `STORAGE FORCE_OUTLINE` persists `SM_ATTFLAG_OOS_FORCE_OUTLINE`. `heap_attrinfo_determine_disk_layout` selects every non-NULL `FORCE_OUTLINE` value larger than 24B before the record gate, then demotes the remaining candidates as usual. This matches the CBRD-26067 issue's target behavior, whose 16B stub size is superseded by the 24B stub. A cache-first JIRA lookup on 2026-11-05 showed CBRD-26067 Resolved/Fixed for `guava`. The behavior became an accepted requirement in canonical [§1](../../OOS-CONTEXT.md#per-column-storage-policy-cbrd-26912-cbrd-26067-cbrd-27259) on 2026-11-05.
 
 ## CBRD-26830: TDE
 
