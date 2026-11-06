@@ -1,6 +1,6 @@
 # OOS implementation observations
 
-Last updated: 2026-11-05 (document modification).
+Last updated: 2026-11-06 (document modification).
 
 Read when comparing an engine/PR with requirements, diagnosing an issue, or checking progress. This file is **non-normative** and maintains one observation entry per issue. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md). Evidence dates/revisions below are independent of the modification date; reverify source/PR state or JIRA before making current claims. No snapshot establishes today's merge status.
 
@@ -35,7 +35,7 @@ Runtime evidence 2026-09-09: original engine `b871ea386` and the then-current ro
 
 Runtime evidence 2026-11-03 (successor observation; the September evidence above is retained): `feature/oos-merge` `dcbf09e4f7fd02ff9c8fc6493ec8887fc2919d67`, `debug_gcc` build, recorded during the CBRD-27881 survey. The preserved regression, ported to that revision with only `DISABLED_` removed (local commit `338b7a1ddda64b7976546281a0a1d998e98b3af1`, not pushed), failed in both of two runs. The original value was readable after rollback; after vacuum, `oos_read_with_alloc` returned -2. gdb showed the vacuum worker calling `vacuum_forward_walk_reclaim_oos` from `vacuum_process_log_block` (`src/query/vacuum.c:3619`), which deleted the committed original value chain through `oos_delete_chain`. The issue's SQL reproduction failed with -1389 after vacuum for the rolled-back row, while a committed-UPDATE control row stayed readable. At that revision `RVOOS_NOTIFY_VACUUM` (`src/transaction/recovery.h:209`) had no emitter, so the §3 remedy was not implemented. Not verified: recovery after kill -9, savepoint rollback, and the release build. This establishes the defect at that revision only, not at later heads. Evidence: [CBRD-27881 survey report, DF-03](../../../my-cubrid-docs/cbrd-27881/CBRD-27881-oos-refactoring-candidates_dcbf09e_claude.md) and the 2026-11-03 comment on [CBRD-27237](https://jira.cubrid.org/browse/CBRD-27237).
 
-Canonical §3 removes the defect mechanism through the postponed notification (ADR-0008 A', accepted 2026-11-05) and removal of forward-walk deletion. A local, uncommitted engine implementation of that remedy exists since 2026-11-05 ([ADR-0008 entry](#adr-0008-reclaim-after-finality)); it is pending verification. The design is an accepted remedy, not proof of completed implementation or an assertion that later branches still have the defect. Verify the target revision before carrying the historical data-loss/merge-gate finding forward. Supporting [historical issue report](../../../my-cubrid-jira/issues/CBRD-27237-oos-forward-walk-rollback-delete_725a32c_claude.md).
+Canonical §3 removes the defect mechanism through the postponed notification (ADR-0008 A', accepted 2026-11-05) and removal of forward-walk deletion. An engine implementation of that remedy, committed 2026-11-05, is carried by draft PR #8434 and not merged ([ADR-0008 entry](#adr-0008-reclaim-after-finality)). The design is an accepted remedy, not proof of completed implementation or an assertion that later branches still have the defect. Verify the target revision before carrying the historical data-loss/merge-gate finding forward. Supporting [historical issue report](../../../my-cubrid-jira/issues/CBRD-27237-oos-forward-walk-rollback-delete_725a32c_claude.md).
 
 ## CBRD-26786: Empty-page reclaim
 
@@ -156,7 +156,12 @@ The remote head had moved to `f67f2f692` when this entry was written; that head 
 - LSA reclaim gate removed (horizon sampling, rollback-CLR equality case). `OOS_RECLAIM_DEFERRED` now means only that the phase-2 WRITE fix was transiently unavailable.
 - Eager skip diagnostics (`ER_HEAP_OOS_EAGER_CLEANUP_SKIPPED`) are emitted when the commit runs the reclaim, with op tag "commit".
 
-Still open at that date: CBRD-27858 (heap forward slot; separate, not closed by ADR-0008); CBRD-27925 READ-latch hint loss (ADR-0009 consequence 2); the decision-7 performance measurement; CBRD-27230 chain reuse; a native database reproduction for CBRD-27925 (separate approval, Work790). This entry records no test result for the implementation; verification evidence is added with the commit.
+Still open at that date: CBRD-27858 (heap forward slot; separate, not closed by ADR-0008); CBRD-27925 READ-latch hint loss (ADR-0009 consequence 2); the decision-7 performance measurement; CBRD-27230 chain reuse; a native database reproduction for CBRD-27925 (separate approval, Work790).
+
+**Draft PR 2026-11-06 (successor observation; the 2026-11-05 evidence above is retained).** Draft PR CUBRID/cubrid#8434, created 2026-11-06, carries the branch: base `feature/oos-merge` (merge base `d52b1889e`), head `2e32517bb9ee4690f49907a1c0a4b90786917008`, not merged. A source review of `3e8072f56` ([report](../../../my-cubrid-docs/cbrd-27781/code-review-pr8434-3e8072f/report.md)) led to `6ac2d7de6`, `9406a0f71`, and `2e32517bb`; the report records findings R1–R5, R9, and R10 as fixed, R6, R7, and R8 as open, and debug OOS ctest 52/52 at `2e32517bb`. gha-ci run 42169072318 built `3e8072f56` and passed. Run 42189034435 builds `2e32517bb`; on 2026-11-06 its builds had passed and most test shards were queued.
+
+- Decision 7, measured 2026-11-05 at `3e8072f56` against `d52b1889e` ([report](../../../my-cubrid-docs/cbrd-27781/perf.md)): reclaim log per discarded 6000-byte value about 6.1 KB → 0.71 KB; OOS pages after UPDATE churn 3539 → 1502; vacuum drain time 0.37 s → 0.31 s, not timed per log block. INSERT and UPDATE latency were not judged: three runs on a shared 80-core machine at load average 57–60 gave overlapping ranges. A remeasurement on a quiet machine is needed.
+- R8, source verified at `2e32517bb`: a stop between `LOG_COMMIT_WITH_POSTPONE` and `LOG_COMMIT` loses the transaction's replication records, because `log_commit_local` appends them after the postpones and restart recovery's `log_complete` appends only the commit record. Recorded without a code change as ADR-0008 consequence 8, which also scopes the eager, UPDATE-drop, and REMOVE paths.
 
 ## Other carried observations
 
