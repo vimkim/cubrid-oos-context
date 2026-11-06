@@ -39,7 +39,8 @@ A cursor-ordered sweep can be dodged: a write refills a page just before the cur
 3. Before the file allocates a page, the growth step checks set members with the existing two-phase reclaim. A reclaimed page ends the step. A page that is busy (another thread holds its latch) stays in the set. A page that is no longer empty, or is already deallocated, leaves the set. The fast path removes the pages it reclaims.
 4. The set may be incomplete after a restart, a failed insertion into the set, or overflow of the size limit. Then the file is marked unknown, and its next growth runs one sector-bitmap lap over the whole file, as the boot rule does now. Pages that the lap finds busy enter the set. A completed lap clears the mark.
 5. The pending-delete counter is removed. A chunk delete that leaves records on the page no longer arms anything.
-6. Adoption needs a measurement under CBRD-27872. INSERT time on a large OOS file after UPDATE and DELETE churn must not be worse, and file size after the churn must not be larger.
+6. `RVOOS_INSERT` undo data carries the OOS file's VFID (8 bytes). The undo deletes the chunk and may empty the page, and recovery passes the page but not the file, so without it a rollback could not name the set that takes the page. Redo data is unchanged. A record without the VFID falls back to the bestspace hint, and then to marking every known file unknown. The change lands before the PR #7990 merge, so under [ADR-0006](0006-reject-pre-stamp-databases-at-boot.md) as amended by ADR-0008 decision 6, `DISK_STORAGE_FORMAT_REVISION` stays 1.
+7. Adoption needs a measurement under CBRD-27872. INSERT time on a large OOS file after UPDATE and DELETE churn must not be worse, and file size after the churn must not be larger.
 
 ## Consequences
 
@@ -47,7 +48,8 @@ A cursor-ordered sweep can be dodged: a write refills a page just before the cur
 2. The Work818 rollback race closes: a page that is latched when checked stays in the set.
 3. The ADR-0008 obligation to re-supply fast-path candidates becomes an optimization. Without the fast path, the next growth still finds every emptied page in the set.
 4. Every path that empties an OOS data page must add it to the set. A path that does not strands that page until the next restart. Review and tests must cover each emptying site.
-5. Tests: an INSERT rollback that empties a page while a growth runs; a delete that empties no page followed by a growth, which must examine no page; a restart followed by a growth; overflow of the set limit.
+5. The log format changes before the PR #7990 merge: `RVOOS_INSERT` gains an 8-byte undo image (decision 6). The storage-format revision stays 1 and no database needs recreating for it: a new engine reads an older record through the fallback, and older readers skip undo data. The log applier reads only `RVOOS_INSERT` redo data. Rolling back the transaction that created an OOS file now passes the VFID too, because the header record uses the same log record.
+6. Tests: an INSERT rollback that empties a page while a growth runs; a delete that empties no page followed by a growth, which must examine no page; a restart followed by a growth; overflow of the set limit.
 
 ## Evidence
 
