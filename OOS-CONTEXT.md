@@ -110,7 +110,7 @@ Every policy is followed by the ordinary bigone guard.
 
 ### bigone Rejection (CBRD-26937, CBRD-27259)
 
-A user-class record never becomes `REC_BIGONE` (accepted 2026-11-09, replacing the 2026-11-05 allowance of non-OOS `REC_BIGONE`, which existed only because testcases depended on it). OOS stubs combined with `REC_BIGONE` overflow were already unsupported. Large fixed-length values such as `BIT(n)`, or many ≤24B variable values, may keep a demoted record above the bigone threshold. `CHAR` is variable-length since CBRD-26663 (verified at PR #7990 head `dcbf09e`) and follows ordinary eligibility. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
+A non-system-class row laid out by `heap_attrinfo_transform_to_disk_internal` is rejected when it would need `REC_BIGONE` (accepted 2026-11-09, replacing the 2026-11-05 allowance of non-OOS `REC_BIGONE`, which existed only because testcases depended on it). The heap layer itself does not check, so writers that skip this layout can still store `REC_BIGONE`: SA compactdb (CBRD-27924), HA replica apply (`xlocator_repl_force` stores the master image), and system-class and root-class (class object) records. OOS stubs combined with `REC_BIGONE` overflow were already unsupported. Large fixed-length values such as `BIT(n)`, or many ≤24B variable values, may keep a demoted record above the bigone threshold. `CHAR` is variable-length since CBRD-26663 (verified at PR #7990 head `dcbf09e`) and follows ordinary eligibility. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
 
 ```text
 if (heap_is_big_length(expected_size) && (has_oos || !oid_is_system_class(class_oid)))
@@ -119,7 +119,7 @@ if (heap_is_big_length(expected_size) && (has_oos || !oid_is_system_class(class_
 
 The error is `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1388 at PR #7990 head `dcbf09e`, 2026-10-27; numbers shift with `develop` merges). The rejection boundary is `heap_Maxslotted_reclength` (~16KB), not the OOS inline target. OOS-backed records between the target and that boundary are valid when candidates run out. Running the gate before `heap_attrinfo_insert_to_oos` avoids orphan chains on rejection.
 
-**Size estimate and scope (accepted 2026-11-09):** `expected_size` includes the full MVCC header (`OR_MVCC_MAX_HEADER_SIZE`), so a later header change on UPDATE or DELETE cannot turn an accepted record into `REC_BIGONE`. Records within that header slack are rejected even though they would fit today. The causes are `STORAGE FORCE_INLINE` values, large fixed-length values, or many ≤24B values. Root and system class records keep `REC_BIGONE` for large catalog rows. The earlier `ER_HEAP_BIGONE_WITHOUT_OOS` notification is withdrawn.
+**Size estimate and scope (accepted 2026-11-09):** `expected_size` includes the full MVCC header (`OR_MVCC_MAX_HEADER_SIZE`), so a later header change on UPDATE or DELETE cannot turn an accepted record into `REC_BIGONE`. Records within that header slack are rejected even though they would fit today. The causes are `STORAGE FORCE_INLINE` values, large fixed-length values, or many ≤24B values. The earlier `ER_HEAP_BIGONE_WITHOUT_OOS` notification is withdrawn.
 
 ---
 
