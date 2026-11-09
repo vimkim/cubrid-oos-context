@@ -1,7 +1,7 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for required CUBRID OOS behavior.
-> Last updated: 2026-11-05 (document modification only). Implementation observations carry their own evidence dates and revisions.
+> Last updated: 2026-11-09 (document modification only). Implementation observations carry their own evidence dates and revisions.
 
 ## Authority and reading paths
 
@@ -61,7 +61,7 @@ At INSERT/UPDATE, `heap_attrinfo_determine_disk_layout` applies an incremental d
 1. **Record gate:** demote only when `header_size + payload_size + mvcc_extra > heap_oos_inline_target_size()`. Use the same target for the trigger and stop. `STORAGE FORCE_OUTLINE` values are selected before this gate (below).
 2. **Eligibility:** `is_variable && column_size > OR_OOS_INLINE_SIZE` (strictly greater than **24B**), excluding `STORAGE FORCE_INLINE` columns (below). Demotion must shrink the value's representation. This is type-agnostic, including BLOB/CLOB **locator bytes**; the external LOB payload stays in the LOB subsystem. The OOS serialization path preserves inline-path `db_elo_copy_with_prefix` semantics before writing the locator (ADR-0002).
 3. **Order and stop:** consider ordinary candidates before `STORAGE PREFER_INLINE` candidates (§ below); within each group sort by size descending. Demote one at a time, subtracting `column_size` and adding 24B. Stop when the record is at or below the target or candidates are exhausted. Smaller eligible values may remain inline.
-4. **Exhausted candidates:** a record may remain above the target. Keep selected values OOS-backed and apply the OOS+bigone guard below. With no candidates and no retained stubs, `has_oos` stays false; an ordinary inline record (for example 14KB) or non-OOS `REC_BIGONE` remains valid, and the latter is reported as below.
+4. **Exhausted candidates:** a record may remain above the target. Keep selected values OOS-backed and apply the bigone guard below. With no candidates and no retained stubs, `has_oos` stays false; an ordinary inline record (for example 14KB) remains valid, and a record over the bigone threshold is rejected as below.
 
 The PostgreSQL-style four-record physical-capacity target is:
 
@@ -101,25 +101,25 @@ Four target-sized records fit: `4 × (4,060 + 4) = 16,256 ≤ 16,268`. The next 
 | `FORCE_OUTLINE` | `SM_ATTFLAG_OOS_FORCE_OUTLINE` | Rejected |
 
 - **`PREFER_INLINE`** is an accepted soft hint for the CUBRID 11.5 OOS merge. Its values remain eligible but sort after ordinary candidates, descending by size within each group; demote them as a last resort. Its sole storage-policy effect is the primary sort key in `heap_attrinfo_determine_disk_layout`.
-- **`FORCE_INLINE`** (accepted 2026-11-05) forbids demotion: its values are never candidates. A record kept large by them stays inline or becomes non-OOS `REC_BIGONE` with the report below. If other values were demoted and the record still needs `REC_BIGONE`, the OOS+bigone guard rejects the write. Never ignore `FORCE_INLINE` to avoid that rejection.
+- **`FORCE_INLINE`** (accepted 2026-11-05) forbids demotion: its values are never candidates. A record kept large by them stays inline when it fits; otherwise the bigone guard below rejects the write, whether or not other values were demoted. Never ignore `FORCE_INLINE` to avoid that rejection.
 - **`FORCE_OUTLINE`** (accepted 2026-11-05) forces demotion: before the record gate, select every non-NULL value larger than `OR_OOS_INLINE_SIZE` (24B), even when the record is below the target. NULL and smaller values stay inline. If the record still exceeds the target, ordinary demotion of the remaining candidates follows.
 
-Every policy is followed by the ordinary OOS+bigone guard.
+Every policy is followed by the ordinary bigone guard.
 
 **Policy changes (accepted 2026-11-05):** ALTER does not relocate stored values; a policy applies when a write lays out the record. `MODIFY`/`CHANGE` without a `STORAGE` clause keeps the policy while the new type is variable and drops it for a fixed type; a later change back to a variable type does not restore it. An explicit fixed-type `DEFAULT` or `FORCE_INLINE` clears any flag. **Open:** under §3 chain reuse, whether an UPDATE that does not assign a `FORCE_INLINE` column keeps a stub demoted before the policy change. Decide when CBRD-27230 is implemented; the 2026-11-05 inclination is to change such stubs as little as possible.
 
-### OOS + bigone Rejection (CBRD-26937)
+### bigone Rejection (CBRD-26937, CBRD-27259)
 
-OOS stubs combined with `REC_BIGONE` overflow are unsupported. Large fixed-length values such as `BIT(n)`, or many ≤24B variable values, may keep a demoted record above the bigone threshold. `CHAR` is variable-length since CBRD-26663 (verified at PR #7990 head `dcbf09e`) and follows ordinary eligibility. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
+A user-class record never becomes `REC_BIGONE` (accepted 2026-11-09, replacing the 2026-11-05 allowance of non-OOS `REC_BIGONE`, which existed only because testcases depended on it). OOS stubs combined with `REC_BIGONE` overflow were already unsupported. Large fixed-length values such as `BIT(n)`, or many ≤24B variable values, may keep a demoted record above the bigone threshold. `CHAR` is variable-length since CBRD-26663 (verified at PR #7990 head `dcbf09e`) and follows ordinary eligibility. In `heap_attrinfo_transform_to_disk_internal`, reject **after demotion and before any OOS chain insert**:
 
 ```text
-if (has_oos && heap_is_big_length(expected_size))
+if (heap_is_big_length(expected_size) && (has_oos || !oid_is_system_class(class_oid)))
   er_set(ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE); return S_ERROR;
 ```
 
 The error is `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1388 at PR #7990 head `dcbf09e`, 2026-10-27; numbers shift with `develop` merges). The rejection boundary is `heap_Maxslotted_reclength` (~16KB), not the OOS inline target. OOS-backed records between the target and that boundary are valid when candidates run out. Running the gate before `heap_attrinfo_insert_to_oos` avoids orphan chains on rejection.
 
-**Non-OOS `REC_BIGONE` report (accepted 2026-11-05, revised 2026-11-06):** when the heap stores a record without OOS stubs as `REC_BIGONE` on insert or update, report `ER_HEAP_BIGONE_WITHOUT_OOS` with the class OID, the stored record length, and the boundary. The heap write reports it, not the layout estimate, so a duplicate-check layout (REPLACE, ODKU) or a record inside the estimate's MVCC header slack does not. The causes are `STORAGE FORCE_INLINE` values, large fixed-length values, or many ≤24B values. The report is a notification, so the server error log keeps it with default parameters; warning severity is not used because `error_log_warning` is off by default. It leaves the caller's error state unchanged, so the write succeeds. Goal, not yet a requirement: rows that pass through OOS layout stop depending on `REC_BIGONE`; the report shows where they still do. Root and system class records skip OOS layout and are outside this rule.
+**Size estimate and scope (accepted 2026-11-09):** `expected_size` includes the full MVCC header (`OR_MVCC_MAX_HEADER_SIZE`), so a later header change on UPDATE or DELETE cannot turn an accepted record into `REC_BIGONE`. Records within that header slack are rejected even though they would fit today. The causes are `STORAGE FORCE_INLINE` values, large fixed-length values, or many ≤24B values. Root and system class records keep `REC_BIGONE` for large catalog rows. The earlier `ER_HEAP_BIGONE_WITHOUT_OOS` notification is withdrawn.
 
 ---
 

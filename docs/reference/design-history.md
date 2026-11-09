@@ -111,7 +111,7 @@ Accepted decisions already have maintained rationale in [ADR-0001](../adr/0001-o
 
 ## Proposals and deferred optimizations
 
-Candidates B–E and the discussion notes below were carried without exact source revisions. They remain proposals or historical implementation descriptions. Candidate A was superseded by an accepted design; see the timeline above. The OVF+OOS coexistence idea was superseded by the canonical [OOS+bigone rejection](../../OOS-CONTEXT.md#oos--bigone-rejection-cbrd-26937), whose recipe is in [test scenarios](test-recipes.md#9-edge-cases-6-tests).
+Candidates B–E and the discussion notes below were carried without exact source revisions. They remain proposals or historical implementation descriptions. Candidate A was superseded by an accepted design; see the timeline above. The OVF+OOS coexistence idea was superseded by the canonical [bigone rejection](../../OOS-CONTEXT.md#bigone-rejection-cbrd-26937-cbrd-27259), whose recipe is in [test scenarios](test-recipes.md#9-edge-cases-6-tests).
 
 ### Earlier optimization candidates
 
