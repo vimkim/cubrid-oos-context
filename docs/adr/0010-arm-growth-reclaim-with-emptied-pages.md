@@ -1,12 +1,12 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Arm growth-side reclaim with emptied pages, not chunk deletes
 
 > **Amends** [OOS-CONTEXT.md](../../OOS-CONTEXT.md) §4, the growth-gate sweep mechanism of the empty-page reclaim invariant, and the glossary term "Pending-delete counter". The invariant itself is unchanged: an OOS file reserves a new sector only when no safely reclaimable empty page exists ([ADR-0009](0009-reclaim-empty-pages-before-growth-not-while-idle.md) decision 2).
 
-Proposed on 2026-11-05 for CBRD-27925 and CBRD-27872 (Work821). Revised on 2026-11-09 after the growth arena (Work829): the owner chose this set as step 1 and in-place reuse as step 2 (see Follow-up). It takes effect when the OOS owner accepts it. Until then §4 stays normative.
+Proposed on 2026-11-05 for CBRD-27925 and CBRD-27872 (Work821). Revised on 2026-11-09 after the growth arena (Work829): the owner chose this set as step 1 and in-place reuse as step 2 (see Follow-up). Accepted by the OOS owner on 2026-11-09 after the CBRD-27872 measurement met decision 7 (see Evidence).
 
 ## Context
 
@@ -51,7 +51,7 @@ A cursor-ordered sweep can be dodged: a write refills a page just before the cur
 4. The set may be incomplete after a restart, a failed insertion into the set, or overflow of the size limit. Then the file is marked unknown, and its next growth runs one sector-bitmap lap over the whole file, as the boot rule does now. Pages that the lap finds busy enter the set. A completed lap clears the mark only when the set did not overflow during the lap; otherwise the file stays unknown and the next growth runs the lap again. After the lap, the growth checks the set again before it allocates.
 5. The pending-delete counter is removed. A chunk delete that leaves records on the page no longer arms anything.
 6. `RVOOS_INSERT` undo data carries the OOS file's VFID (8 bytes). The undo deletes the chunk and may empty the page, and recovery passes the page but not the file, so without it a rollback could not name the set that takes the page. Redo data is unchanged. A record without the VFID falls back to the bestspace hint, and then to marking every known file unknown. The change lands before the PR #7990 merge, so under [ADR-0006](0006-reject-pre-stamp-databases-at-boot.md) as amended by ADR-0008 decision 6, `DISK_STORAGE_FORMAT_REVISION` stays 1.
-7. Adoption needs a measurement under CBRD-27872. INSERT time on a large OOS file after UPDATE and DELETE churn must not be worse, and file size after the churn must not be larger.
+7. Adoption needs a measurement under CBRD-27872. INSERT time on a large OOS file after UPDATE and DELETE churn must not be worse, and file size after the churn must not be larger. Met on 2026-11-09 for the set with the growth lock and the recheck (`e8e714dae`), against `6a8d16da7`, on a file of about 20,000 OOS pages. Medians: an INSERT after a delete and vacuum took 4.6 ms instead of 51 ms and fixed 42 pages instead of about 20,000; the slowest of 8 concurrent growing INSERTs took 5.9 ms instead of 69 ms; sector counts after churn were equal. The machine was shared (load average 68 to 132), so only the comparison between builds is meaningful.
 
 ## Consequences
 
@@ -73,6 +73,7 @@ On 2026-11-06 the owner chose reuse-first as the target: a growth that finds an 
 - Report: `my-cubrid-docs` `cbrd-27925/growth-bound-design.md` (Work821), with the engine cost structure, the model, and its limits.
 - Model and runner: `my-cubrid-docs` `cbrd-27925/growth-model/OosGrowthBound.tla` and `run.py`.
 - The rollback race: `my-cubrid-docs` `cbrd-27925/adr0008-claude-review.md` (Work818).
+- Measurement: `my-cubrid-docs` `cbrd-27872/growth-cost-measurement.md` (Work839), sections of 2026-11-06 (`076c3e4c6`) and 2026-11-09 (`e8e714dae`), with the harness and raw CSV.
 - Growth arena (Work829): `my-cubrid-docs` branch `docs/CBRD-27925-growth-arena`, `cbrd-27925/growth-arena/`. Candidate A attacks this set design (`a-cand-attack/REPORT.md`); candidate C models reuse-first and the recheck after the lap (`c-reuse-first/REPORT.md`).
 
 The model is a small finite design model. It does not show that code conforms or how much time is saved.
