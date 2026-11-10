@@ -1,6 +1,6 @@
 # OOS implementation observations
 
-Last updated: 2026-11-06 (document modification).
+Last updated: 2026-11-11 (document modification).
 
 Read when comparing an engine/PR with requirements, diagnosing an issue, or checking progress. This file is **non-normative** and maintains one observation entry per issue. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md). Evidence dates/revisions below are independent of the modification date; reverify source/PR state or JIRA before making current claims. No snapshot establishes today's merge status.
 
@@ -158,7 +158,7 @@ The remote head had moved to `f67f2f692` when this entry was written; that head 
 
 Still open at that date: CBRD-27858 (heap forward slot; separate, not closed by ADR-0008); CBRD-27925 READ-latch hint loss (ADR-0009 consequence 2); the decision-7 performance measurement; CBRD-27230 chain reuse; a native database reproduction for CBRD-27925 (separate approval, Work790).
 
-**Draft PR 2026-11-06 (successor observation; the 2026-11-05 evidence above is retained).** Draft PR CUBRID/cubrid#8434, created 2026-11-06, carries the branch: base `feature/oos-merge` (merge base `d52b1889e`), head `2e32517bb9ee4690f49907a1c0a4b90786917008`, not merged. A source review of `3e8072f56` ([report](../../../my-cubrid-docs/cbrd-27781/code-review-pr8434-3e8072f/report.md)) led to `6ac2d7de6`, `9406a0f71`, and `2e32517bb`; the report records findings R1–R5, R9, and R10 as fixed, R6, R7, and R8 as open, and debug OOS ctest 52/52 at `2e32517bb`. gha-ci run 42169072318 built `3e8072f56` and passed. Run 42189034435 builds `2e32517bb`; on 2026-11-06 its builds had passed and most test shards were queued.
+**Draft PR 2026-11-06 (successor observation; the 2026-11-05 evidence above is retained).** Draft PR CUBRID/cubrid#8434, created 2026-11-06, carries the branch: base `feature/oos-merge` (merge base `d52b1889e`), head `2e32517bb9ee4690f49907a1c0a4b90786917008`, not merged. A source review of `3e8072f56` ([report](../../../my-cubrid-docs/cbrd-27781/code-review-pr8434-3e8072f/report.md)) led to `6ac2d7de6`, `9406a0f71`, and `2e32517bb`; the report records findings R1–R5, R9, and R10 as fixed, R6, R7, and R8 as open, and debug OOS ctest 52/52 at `2e32517bb`. gha-ci run 42169072318 built `3e8072f56` and passed. Run 42189034435 builds `2e32517bb`; it completed with success at 2026-11-06 11:43 UTC (checked 2026-11-11).
 
 - Decision 7, measured 2026-11-05 at `3e8072f56` against `d52b1889e` ([report](../../../my-cubrid-docs/cbrd-27781/perf.md)): reclaim log per discarded 6000-byte value about 6.1 KB → 0.71 KB; OOS pages after UPDATE churn 3539 → 1502; vacuum drain time 0.37 s → 0.31 s, not timed per log block. INSERT and UPDATE latency were not judged: three runs on a shared 80-core machine at load average 57–60 gave overlapping ranges. A remeasurement on a quiet machine is needed.
 - R8, source verified at `2e32517bb`: a stop between `LOG_COMMIT_WITH_POSTPONE` and `LOG_COMMIT` loses the transaction's replication records, because `log_commit_local` appends them after the postpones and restart recovery's `log_complete` appends only the commit record. Recorded without a code change as ADR-0008 consequence 8, which also scopes the eager, UPDATE-drop, and REMOVE paths.
