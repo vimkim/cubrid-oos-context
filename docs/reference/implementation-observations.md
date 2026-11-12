@@ -1,6 +1,6 @@
 # OOS implementation observations
 
-Last updated: 2026-11-11 (document modification).
+Last updated: 2026-11-12 (document modification).
 
 Read when comparing an engine/PR with requirements, diagnosing an issue, or checking progress. This file is **non-normative** and maintains one observation entry per issue. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md). Evidence dates/revisions below are independent of the modification date; reverify source/PR state or JIRA before making current claims. No snapshot establishes today's merge status.
 
@@ -161,6 +161,7 @@ Still open at that date: CBRD-27858 (heap forward slot; separate, not closed by 
 **Draft PR 2026-11-06 (successor observation; the 2026-11-05 evidence above is retained).** Draft PR CUBRID/cubrid#8434, created 2026-11-06, carries the branch: base `feature/oos-merge` (merge base `d52b1889e`), head `2e32517bb9ee4690f49907a1c0a4b90786917008`, not merged. A source review of `3e8072f56` ([report](../../../my-cubrid-docs/cbrd-27781/code-review-pr8434-3e8072f/report.md)) led to `6ac2d7de6`, `9406a0f71`, and `2e32517bb`; the report records findings R1–R5, R9, and R10 as fixed, R6, R7, and R8 as open, and debug OOS ctest 52/52 at `2e32517bb`. gha-ci run 42169072318 built `3e8072f56` and passed. Run 42189034435 builds `2e32517bb`; it completed with success at 2026-11-06 11:43 UTC (checked 2026-11-11).
 
 - Decision 7, measured 2026-11-05 at `3e8072f56` against `d52b1889e` ([report](../../../my-cubrid-docs/cbrd-27781/perf.md)): reclaim log per discarded 6000-byte value about 6.1 KB → 0.71 KB; OOS pages after UPDATE churn 3539 → 1502; vacuum drain time 0.37 s → 0.31 s, not timed per log block. INSERT and UPDATE latency were not judged: three runs on a shared 80-core machine at load average 57–60 gave overlapping ranges. A remeasurement on a quiet machine is needed.
+- Decision 7 latency, remeasured 2026-11-12 ([report](../../../my-cubrid-docs/cbrd-27781/latency-8495/README.md)), release_gcc on the shared 80-core machine (load average 18–232), arms rotated through all six orders, 12 runs each: base `50619ce53`, PR head `0d9732a63`, and PR head plus CUBRID/cubrid#8495 (CBRD-28046, `6a7ca6b4a`, local cherry-pick). 3000 single-row OOS UPDATE+COMMIT: `fdatasync` 3011 / 6006 / 3006; median 12.28 / 16.22 / 11.13 s; paired fix − base median −1.43 s (within the base IQR). UPDATE churn: all timings within the handoff criterion for every arm. Cause of the PR-alone regression: `log_append_commit_postpone` flushes the log, adding one synchronous flush per committing transaction that has a postpone. The condition is met only with #8495; PR #8434 waits for #8495 to reach `feature/oos-merge` (owner decision 2026-11-12).
 - R8, source verified at `2e32517bb`: a stop between `LOG_COMMIT_WITH_POSTPONE` and `LOG_COMMIT` loses the transaction's replication records, because `log_commit_local` appends them after the postpones and restart recovery's `log_complete` appends only the commit record. Recorded without a code change as ADR-0008 consequence 8, which also scopes the eager, UPDATE-drop, and REMOVE paths.
 
 ## Other carried observations
