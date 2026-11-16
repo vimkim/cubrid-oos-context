@@ -37,7 +37,7 @@ The reference documents contain evidence and rationale. They do not add hidden r
 | OOS Expand | Record-level, eager replacement of every stub; `HEAP_GET_CONTEXT.expand_oos` → `heap_record_replace_oos_oids` |
 | OOS Resolve | Attribute-level, lazy value retrieval; `heap_attrvalue_read_oos_inline` → `oos_read` |
 | OOS Read | Storage-level `oos_read` reconstructs one chain; distinct from Resolve |
-| OOS inline target | Aligned physical four-record heap-capacity target, independent of unfill (§1) |
+| OOS inline target | Configured byte threshold, or the automatic aligned four-record heap-capacity target, independent of unfill (§1) |
 | OOS Demotion | INSERT/UPDATE moves largest eligible values until the target or candidate exhaustion (§1) |
 | Numerable file | Tracks allocation order for nth-page access (`file_numerable_find_nth`) |
 | Bestspace sync | Tier-3 page sampling recharges hints after cache/best[] misses (§2) |
@@ -63,7 +63,13 @@ At INSERT/UPDATE, `heap_attrinfo_determine_disk_layout` applies an incremental d
 3. **Order and stop:** consider ordinary candidates before `STORAGE PREFER_INLINE` candidates (§ below); within each group sort by size descending. Demote one at a time, subtracting `column_size` and adding 24B. Stop when the record is at or below the target or candidates are exhausted. Smaller eligible values may remain inline.
 4. **Exhausted candidates:** a record may remain above the target. Keep selected values OOS-backed and apply the bigone guard below. With no candidates and no retained stubs, `has_oos` stays false; an ordinary inline record (for example 14KB) remains valid, and a record over the bigone threshold is rejected as below.
 
-The PostgreSQL-style four-record physical-capacity target is:
+`oos_trigger_threshold` configures the same byte threshold for the record gate and demotion stop (CBRD-28062). Its default, `0`, selects the PostgreSQL-style four-record physical-capacity calculation below. Zero never disables OOS. An explicit value must be from `OR_OOS_INLINE_SIZE + 1` (25B) through `heap_Maxslotted_reclength` for the database's page size. With the current layout, the maximum is 16,236B on a 16KiB page and 3,948B on a 4KiB page. Preserve explicit byte values without rounding or clamping. Reject an invalid value during startup, after the database page size is known.
+
+This is a static server parameter. Changes require a server restart or a new standalone process. CS INSERT, UPDATE, and loaddb use the destination server's value. SA operations and SA loaddb use their local process configuration. Existing configuration-section precedence applies, including `[standalone]` overrides. Use matching settings across HA nodes and SA tools when the same placement policy is wanted. Replica apply stores the master image without applying its own demotion threshold; after failover, new writes use the new master's setting.
+
+Changing the setting does not rewrite stored rows. Reads continue to follow each record's OOS flags. INSERT and UPDATE use the newly configured target when laying out a record. Column STORAGE policies and the final bigone guard remain in force at every setting. At the maximum, eligible values in a row larger than the heap limit still move to OOS. A row that remains too large is rejected.
+
+The automatic PostgreSQL-style four-record physical-capacity target is:
 
 ```text
 records_per_page = 4
@@ -314,7 +320,7 @@ The accepted OOS design uses separate value chains per attribute and has no OOS-
 - Use the glossary's terms precisely: **OOS OID** names a physical chunk OID, **head OOS OID** names the stub's OID, and **OOS inline stub** names the full 24B representation rather than a pointer/OID.
 - Distinguish **OOS value**, **chunk record**, and **value chain**. Use **OOS-backed attribute** for a row value; a schema column is eligible and may remain inline. Use **OOS subsystem** for the whole feature.
 - Keep **Expand** (record), **Resolve** (attribute), and **Read** (storage) distinct. Avoid “bulk externalization” for accepted demotion, “indexed/ordered file” for numerable, “full scan/refill” for bestspace sync, “data-sector scan” for sector-bitmap walk, and “full sweep” for cursor-resumed reclaim.
-- Describe the gate as the **PG-style four-record heap target**, derived by `heap_oos_inline_target_size()` independently of unfill; state eligibility as `> OR_OOS_INLINE_SIZE` (24B). Former `DB_PAGESIZE/8`/512B and raw quarter-page rules are historical.
+- Describe the gate as the **configured OOS inline target**, whose automatic default is the PG-style four-record heap target, derived by `heap_oos_inline_target_size()` independently of unfill; state eligibility as `> OR_OOS_INLINE_SIZE` (24B). Former `DB_PAGESIZE/8`/512B and raw quarter-page rules are historical.
 - Use the accepted [UPDATE ownership invariant](#update-ownership-and-chain-reuse-cbrd-27230); label exclusive-version ownership as historical M1.
 - Use **reclaim intent** for the postponed decision and **OOS reclaimer** for the redo-only deletion; neither is a rollback or an undoable cleanup sysop.
 - Add a space between inline code and Korean text: `` `oos_read` 는 ``.

@@ -57,6 +57,18 @@ Snapshot dated 2026-09-22, carried in context `0eab7df`: draft PR #7462 implemen
 
 Source verified 2026-11-05 at `feature/oos-merge` `d52b1889e`: `heap_attrinfo_determine_disk_layout` still compares the record with `DB_PAGESIZE / 4` for the trigger and the stop.
 
+## CBRD-28062: Configurable trigger threshold
+
+Verified 2026-11-16 at local task commit `7ecfbbf1a9` on `CBRD-28062-oos-param`, based on PR #8416 head `fba87586b8`. PR #8416 was open and unmerged at verification. This is implementation evidence for the task branch, not integration evidence for `feature/oos-merge`.
+
+`oos_trigger_threshold` is a static server parameter with size-unit parsing. Zero retains the automatic four-record target. Heap initialization rejects a nonzero value outside 25B through the database's heap maximum. The existing `heap_oos_inline_target_size()` accessor supplies both layout and copy-area preparation. No record or log format changes.
+
+A debug build and installation passed. Seven focused CTest entries passed, including `test_oos_trigger_threshold`, SQL storage, boundary, bigone, and deferred-write preparation tests plus the database fixtures. The configuration regression verifies startup and rejection with private 4KiB and 16KiB databases. SQL tests inspect the current row's OOS flag and BIT value after changing the target in their controlled single-process setup and updating the row in both directions.
+
+A separate native-utility check passed CS and SA insertion, CS and SA loaddb, reading stored OOS values after a configuration change, overflow-size value demotion, and checkdb. It also verified 16,236B acceptance and 16,237B rejection on 16KiB pages, and 3,948B acceptance and 3,949B rejection on 4KiB pages. No HA or crash-recovery run was performed. The release performance sweep and verification after PR #8416 merges remain pending; these checks do not establish the ticket's performance acceptance criteria.
+
+Required configuration contract: canonical §1. The automatic default remains unchanged pending the separate performance decision.
+
 ## CBRD-26912: Inline preference
 
 Record dated 2026-09-22, added to context 2026-10-08: `STORAGE PREFER_INLINE` is accepted 11.5 merge scope. The context records PR #7334 merged into `feat/oos` as `4523843d1` on 2026-06-29 and JIRA Resolved/Fixed for target `guava`. This corrects “proposed — NOT yet merged.” It is a carried merge/workflow observation, not a new live lookup; required behavior is canonical §1.
