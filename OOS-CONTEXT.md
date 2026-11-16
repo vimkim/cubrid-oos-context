@@ -1,7 +1,7 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for required CUBRID OOS behavior.
-> Last updated: 2026-11-11 (document modification only). Implementation observations carry their own evidence dates and revisions.
+> Last updated: 2026-11-16 (document modification only). Implementation observations carry their own evidence dates and revisions.
 
 ## Authority and reading paths
 
@@ -106,7 +106,7 @@ Four target-sized records fit: `4 × (4,060 + 4) = 16,256 ≤ 16,268`. The next 
 
 Every policy is followed by the ordinary bigone guard.
 
-**Policy changes (accepted 2026-11-05):** ALTER does not relocate stored values; a policy applies when a write lays out the record. A change that gains `FORCE_INLINE` first lays out every row visible to the ALTER under the new policy and fails with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` if any row would be rejected; it still moves no value (accepted 2026-11-11, PR #8416 review). Without this check, a value already in OOS that cannot fit inline would make every later UPDATE of its row, and loading its unloaded data, fail. `MODIFY`/`CHANGE` without a `STORAGE` clause keeps the policy while the new type is variable and drops it for a fixed type; a later change back to a variable type does not restore it. An explicit fixed-type `DEFAULT` or `FORCE_INLINE` clears any flag. **Open:** under §3 chain reuse, whether an UPDATE that does not assign a `FORCE_INLINE` column keeps a stub demoted before the policy change. Decide when CBRD-27230 is implemented; the 2026-11-05 inclination is to change such stubs as little as possible.
+**Policy changes (accepted 2026-11-05):** ALTER does not relocate stored values; a policy applies when a write lays out the record. A change that gains `FORCE_INLINE` first lays out every existing row under the new policy and fails with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` if any row would be rejected; it still moves no value (accepted 2026-11-11, PR #8416 review). The check reads the class and every partition and subclass that inherits the column, and it sees every row that exists under its `SCH_M_LOCK`, including rows committed after the ALTER transaction's snapshot; committed deletes are skipped (accepted 2026-11-16, PR #8416 review). Without this check, a value already in OOS that cannot fit inline would make every later UPDATE of its row, and loading its unloaded data, fail. `MODIFY`/`CHANGE` without a `STORAGE` clause keeps the policy while the new type is variable and drops it for a fixed type; a later change back to a variable type does not restore it. An explicit fixed-type `DEFAULT` or `FORCE_INLINE` clears any flag. **Open:** under §3 chain reuse, whether an UPDATE that does not assign a `FORCE_INLINE` column keeps a stub demoted before the policy change. Decide when CBRD-27230 is implemented; the 2026-11-05 inclination is to change such stubs as little as possible.
 
 ### bigone Rejection (CBRD-26937, CBRD-27259)
 
