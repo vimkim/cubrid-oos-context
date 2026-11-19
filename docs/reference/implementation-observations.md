@@ -1,6 +1,6 @@
 # OOS implementation observations
 
-Last updated: 2026-11-12 (document modification).
+Last updated: 2026-11-19 (document modification).
 
 Read when comparing an engine/PR with requirements, diagnosing an issue, or checking progress. This file is **non-normative** and maintains one observation entry per issue. Required behavior remains in [OOS-CONTEXT.md](../../OOS-CONTEXT.md). Evidence dates/revisions below are independent of the modification date; reverify source/PR state or JIRA before making current claims. No snapshot establishes today's merge status.
 
@@ -66,6 +66,8 @@ Verified 2026-11-16 at local task commit `7ecfbbf1a9` on `CBRD-28062-oos-param`,
 A debug build and installation passed. Seven focused CTest entries passed, including `test_oos_trigger_threshold`, SQL storage, boundary, bigone, and deferred-write preparation tests plus the database fixtures. The configuration regression verifies startup and rejection with private 4KiB and 16KiB databases. SQL tests inspect the current row's OOS flag and BIT value after changing the target in their controlled single-process setup and updating the row in both directions.
 
 A separate native-utility check passed CS and SA insertion, CS and SA loaddb, reading stored OOS values after a configuration change, overflow-size value demotion, and checkdb. It also verified 16,236B acceptance and 16,237B rejection on 16KiB pages, and 3,948B acceptance and 3,949B rejection on 4KiB pages. No HA or crash-recovery run was performed. The release performance sweep and verification after PR #8416 merges remain pending; these checks do not establish the ticket's performance acceptance criteria.
+
+Verified again 2026-11-19 at `49d8df0dd5`, the same change rebased onto `feature/oos-merge` `e262e79fab` after PR #8416 merged as squash `c793adf908` (2026-11-18). The rebase moved the parameter to the end of `prm_Def[]`, after `PRM_ID_NUMERIC_EMPTY_STRING_AS_NULL`, so the PL server's hard-coded parameter ordinals stay valid. A debug build passed, and all 67 CTest entries passed, including `test_oos_trigger_threshold` and the three `ConfiguredThreshold*` SQL storage tests. The native-utility checks were not repeated after the rebase. Draft PR #8632 targets `feature/oos-merge`; this is task-branch evidence, not integration evidence. The release performance sweep is still pending.
 
 Required configuration contract: canonical §1. The automatic default remains unchanged pending the separate performance decision.
 
