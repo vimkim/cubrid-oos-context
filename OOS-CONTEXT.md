@@ -1,7 +1,7 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for required CUBRID OOS behavior.
-> Last updated: 2026-11-16 (document modification only). Implementation observations carry their own evidence dates and revisions.
+> Last updated: 2026-11-19 (document modification only). Implementation observations carry their own evidence dates and revisions.
 
 ## Authority and reading paths
 
@@ -63,7 +63,7 @@ At INSERT/UPDATE, `heap_attrinfo_determine_disk_layout` applies an incremental d
 3. **Order and stop:** consider ordinary candidates before `STORAGE PREFER_INLINE` candidates (§ below); within each group sort by size descending. Demote one at a time, subtracting `column_size` and adding 24B. Stop when the record is at or below the target or candidates are exhausted. Smaller eligible values may remain inline.
 4. **Exhausted candidates:** a record may remain above the target. Keep selected values OOS-backed and apply the bigone guard below. With no candidates and no retained stubs, `has_oos` stays false; an ordinary inline record (for example 14KB) remains valid, and a record over the bigone threshold is rejected as below.
 
-`oos_trigger_threshold` configures the same byte threshold for the record gate and demotion stop (CBRD-28062). Its default, `0`, selects the PostgreSQL-style four-record physical-capacity calculation below. Zero never disables OOS. An explicit value must be from `OR_OOS_INLINE_SIZE + 1` (25B) through `heap_Maxslotted_reclength` for the database's page size. With the current layout, the maximum is 16,236B on a 16KiB page and 3,948B on a 4KiB page. Preserve explicit byte values without rounding or clamping. Reject an invalid value during startup, after the database page size is known.
+`oos_trigger_threshold` configures the same byte threshold for the record gate and demotion stop (CBRD-28062). Its default, `0`, selects the PostgreSQL-style four-record physical-capacity calculation below. Zero never disables OOS. An explicit value must be from the automatic target through `heap_Maxslotted_reclength` for the database's page size, so the parameter can only raise the target. A lower value would let system-class rows such as `_db_serial` move values to OOS on page sizes where they stay inline at the default, which exposes the serial chain leak (CBRD-28035) (owner decision, 2026-11-19). With the current layout, the range is 4,060B through 16,236B on a 16KiB page and 988B through 3,948B on a 4KiB page. Preserve explicit byte values without rounding or clamping. Reject an invalid value during startup, after the database page size is known.
 
 This is a static server parameter. Changes require a server restart or a new standalone process. CS INSERT, UPDATE, and loaddb use the destination server's value. SA operations and SA loaddb use their local process configuration. Existing configuration-section precedence applies, including `[standalone]` overrides. Use matching settings across HA nodes and SA tools when the same placement policy is wanted. Replica apply stores the master image without applying its own demotion threshold; after failover, new writes use the new master's setting.
 

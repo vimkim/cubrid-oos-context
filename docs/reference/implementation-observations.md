@@ -69,6 +69,8 @@ A separate native-utility check passed CS and SA insertion, CS and SA loaddb, re
 
 Verified again 2026-11-19 at `49d8df0dd5`, the same change rebased onto `feature/oos-merge` `e262e79fab` after PR #8416 merged as squash `c793adf908` (2026-11-18). The rebase moved the parameter to the end of `prm_Def[]`, after `PRM_ID_NUMERIC_EMPTY_STRING_AS_NULL`, so the PL server's hard-coded parameter ordinals stay valid. A debug build passed, and all 67 CTest entries passed, including `test_oos_trigger_threshold` and the three `ConfiguredThreshold*` SQL storage tests. The native-utility checks were not repeated after the rebase. Draft PR #8632 targets `feature/oos-merge`; this is task-branch evidence, not integration evidence. The release performance sweep is still pending.
 
+Verified 2026-11-19 at `44dab49185` (PR #8632, second commit): heap initialization now rejects a nonzero value below the automatic target, so the explicit range is 4,060B through 16,236B on 16KiB pages and 988B through 3,948B on 4KiB pages. Startup probes on private databases confirmed both lower boundaries (987B refused, 988B accepted on 4KiB; 4,059B refused, 4,060B accepted on 16KiB). The change follows an independent review that reproduced the CBRD-28035 serial chain leak on a 16KiB database with a 64B threshold on the earlier commit. All 67 CTest entries passed. A CS-mode check placed a 6,000B value in OOS at the default and inline at the maximum, for both CS INSERT and CS loaddb.
+
 Required configuration contract: canonical §1. The automatic default remains unchanged pending the separate performance decision.
 
 ## CBRD-26912: Inline preference
