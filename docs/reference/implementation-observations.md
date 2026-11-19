@@ -71,6 +71,8 @@ Verified again 2026-11-19 at `49d8df0dd5`, the same change rebased onto `feature
 
 Verified 2026-11-19 at `44dab49185` (PR #8632, second commit): heap initialization now rejects a nonzero value below the automatic target, so the explicit range is 4,060B through 16,236B on 16KiB pages and 988B through 3,948B on 4KiB pages. Startup probes on private databases confirmed both lower boundaries (987B refused, 988B accepted on 4KiB; 4,059B refused, 4,060B accepted on 16KiB). The change follows an independent review that reproduced the CBRD-28035 serial chain leak on a 16KiB database with a 64B threshold on the earlier commit. All 67 CTest entries passed. A CS-mode check placed a 6,000B value in OOS at the default and inline at the maximum, for both CS INSERT and CS loaddb.
 
+Systemic review on 2026-11-19 at `44dab49185` (two independent reviewers) reproduced two defects introduced by the parameter: raising the threshold made `_db_serial` rows grow in place so NEXT VALUE aborted at `serial.c:1587` on a full 4KiB page, and `restoredb` rejected an invalid value only after it had overwritten the volumes. The follow-up commit keeps system classes on the automatic target, moves the range check into `heap_oos_check_trigger_threshold()` called at server start, createdb, and emergency patch but not during restore, and removes size-unit parsing so the value round-trips through `paramdump`. A new CTest entry, `test_oos_trigger_threshold_system`, reproduces the serial abort on the earlier commit and passes on the fix. Related follow-ups: CBRD-28266, CBRD-28267, CBRD-28268, and a CBRD-28073 comment.
+
 Required configuration contract: canonical §1. The automatic default remains unchanged pending the separate performance decision.
 
 ## CBRD-26912: Inline preference
