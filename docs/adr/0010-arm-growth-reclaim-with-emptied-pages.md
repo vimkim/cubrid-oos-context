@@ -1,12 +1,17 @@
 ---
+id: OOS-ADR-0010
 status: accepted
+last_updated: 2026-11-09
+jira_issues:
+  - CBRD-27925
+  - CBRD-27872
 ---
 
 # Arm growth-side reclaim with emptied pages, not chunk deletes
 
 > **Amends** [OOS-CONTEXT.md](../../OOS-CONTEXT.md) §4, the growth-gate sweep mechanism of the empty-page reclaim invariant, and the glossary term "Pending-delete counter". The invariant itself is unchanged: an OOS file reserves a new sector only when no safely reclaimable empty page exists ([ADR-0009](0009-reclaim-empty-pages-before-growth-not-while-idle.md) decision 2).
 
-Proposed on 2026-11-05 for CBRD-27925 and CBRD-27872 (Work821). Revised on 2026-11-09 after the growth arena (Work829): the owner chose this set as step 1 and in-place reuse as step 2 (see Follow-up). Accepted by the OOS owner on 2026-11-09 after the CBRD-27872 measurement met decision 7 (see Evidence).
+Proposed on 2026-11-05 for CBRD-27925 and CBRD-27872. Revised on 2026-11-09 after the growth arena: the owner chose this set as step 1 and in-place reuse as step 2 (see Follow-up). Accepted by the OOS owner on 2026-11-09 after the CBRD-27872 measurement met decision 7 (see Evidence).
 
 ## Context
 
@@ -18,13 +23,13 @@ At `feature/oos-merge` `d52b1889e`, the cost comes from how the growth gate is a
 - An armed growth collects and sorts the whole sector table, then READ-fixes every allocated page from the cursor until it reclaims one. A lap that reclaims nothing walks the whole file. Concurrent growers of the same file wait for it (`oos_reclaim_sweep_step`, 1816-2000).
 - So after any vacuum batch, the next growth of the file usually walks the whole file and finds nothing. On a large file this is a full read of the file on the INSERT path.
 
-The same structure has a correctness gap (Work818). An INSERT rollback notes its delete while it holds the page WRITE latch. A sweep that cannot READ-fix that page skips it, and the lap settlement clears the counter, so the empty page waits for the next unrelated delete.
+The same structure has a correctness gap. An INSERT rollback notes its delete while it holds the page WRITE latch. A sweep that cannot READ-fix that page skips it, and the lap settlement clears the counter, so the empty page waits for the next unrelated delete.
 
 A TLA+ model of one OOS file compared the current gate, two fixes for the rollback race, a per-allocation page budget (the weaker bound), and an emptied-page set. The model has bounded pages and chunks, one grower (the per-file single-flight serializes growers), vacuum deletes, the fast path, one rollback that holds a latch, restarts, and optionally writes between the grower's steps.
 
 | Design | Current rule | File size bounded |
 | --- | --- | --- |
-| Current gate (`SKIPPED` on a busy page) | Fails (the Work818 race) | Only without writes during a growth |
+| Current gate (`SKIPPED` on a busy page) | Fails (the rollback race) | Only without writes during a growth |
 | (a) Count a busy page as `DEFERRED` | Holds | Only without writes during a growth |
 | (b) Retry set for pages emptied by rollback | Holds | Only without writes during a growth |
 | Examine at most N pages per allocation (N = 1, 2) | Fails | No |
@@ -56,7 +61,7 @@ A cursor-ordered sweep can be dodged: a write refills a page just before the cur
 ## Consequences
 
 1. Growth costs a check per page emptied since the last growth, plus a recheck of pages still latched by a rollback. The whole-file lap remains once per file after a restart or overflow.
-2. The Work818 rollback race closes: a page that is latched when checked stays in the set.
+2. The rollback race closes: a page that is latched when checked stays in the set.
 3. The ADR-0008 obligation to re-supply fast-path candidates becomes an optimization. Without the fast path, the next growth still finds every emptied page in the set.
 4. Every path that empties an OOS data page must add it to the set. A path that does not strands that page until the next restart. Review and tests must cover each emptying site.
 5. The log format changes before the PR #7990 merge: `RVOOS_INSERT` gains an 8-byte undo image (decision 6). The storage-format revision stays 1 and no database needs recreating for it: a new engine reads an older record through the fallback, and older readers skip undo data. The log applier reads only `RVOOS_INSERT` redo data. Rolling back the transaction that created an OOS file now passes the VFID too, because the header record uses the same log record.
@@ -70,10 +75,10 @@ On 2026-11-06 the owner chose reuse-first as the target: a growth that finds an 
 
 ## Evidence
 
-- Report: `my-cubrid-docs` `cbrd-27925/growth-bound-design.md` (Work821), with the engine cost structure, the model, and its limits.
-- Model and runner: `my-cubrid-docs` `cbrd-27925/growth-model/OosGrowthBound.tla` and `run.py`.
-- The rollback race: `my-cubrid-docs` `cbrd-27925/adr0008-claude-review.md` (Work818).
-- Measurement: `my-cubrid-docs` `cbrd-27872/growth-cost-measurement.md` (Work839), sections of 2026-11-06 (`076c3e4c6`) and 2026-11-09 (`e8e714dae`), with the harness and raw CSV.
-- Growth arena (Work829): `my-cubrid-docs` branch `docs/CBRD-27925-growth-arena`, `cbrd-27925/growth-arena/`. Candidate A attacks this set design (`a-cand-attack/REPORT.md`); candidate C models reuse-first and the recheck after the lap (`c-reuse-first/REPORT.md`).
+- Report: [growth-bound-design.md](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-27925/growth-bound-design.md), with the engine cost structure, the model, and its limits.
+- Model and runner: [OosGrowthBound.tla](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-27925/growth-model/OosGrowthBound.tla) and `run.py`.
+- The rollback race: [adr0008-claude-review.md](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-27925/adr0008-claude-review.md).
+- Measurement: [growth-cost-measurement.md](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-27872/growth-cost-measurement.md), sections of 2026-11-06 (`076c3e4c6`) and 2026-11-09 (`e8e714dae`), with the harness and raw CSV.
+- Growth arena: `vimkim/my-cubrid-docs` branch `docs/CBRD-27925-growth-arena`, `cbrd-27925/growth-arena/`. Candidate A attacks this set design (`a-cand-attack/REPORT.md`); candidate C models reuse-first and the recheck after the lap (`c-reuse-first/REPORT.md`).
 
 The model is a small finite design model. It does not show that code conforms or how much time is saved.

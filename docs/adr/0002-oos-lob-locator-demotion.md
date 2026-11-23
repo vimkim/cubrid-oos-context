@@ -1,5 +1,9 @@
 ---
+id: OOS-ADR-0002
 status: accepted
+last_updated: 2026-07-13
+jira_issues:
+  - CBRD-26814
 ---
 
 # BLOB/CLOB locator columns remain OOS-demotable (type-agnostic eligibility)

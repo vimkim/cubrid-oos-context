@@ -1,5 +1,9 @@
 ---
+id: OOS-ADR-0007
 status: accepted
+last_updated: 2026-10-27
+jira_issues:
+  - CBRD-26939
 ---
 
 # Run the deferred-CDC regressions in QA regression only, not develop CI

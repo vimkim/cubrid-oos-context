@@ -69,7 +69,7 @@ The 2026-06-02 correction established that undo contains stubs, not expanded val
 These rules were normative in `OOS-CONTEXT.md` at context commit `281a940`. [ADR-0008](../adr/0008-reclaim-oos-chains-after-the-delete-is-final.md), proposed on 2026-11-03 and accepted by the team lead on 2026-11-05, replaces them. They describe the code at `feature/oos-merge` `dcbf09e4f`; the [ADR-0008 observation](implementation-observations.md#adr-0008-reclaim-after-finality) records that gap.
 
 - **Vacuum + OOS.** "REMOVE deletes within the caller's sysop; notification cleanup uses atomic system operations. Chunk deletes are logged so a mid-delete failure/recovery rolls back or replays the appropriate atomic operation. The SA/non-MVCC eager path reclaims unreferenced chains synchronously and follows §2 diagnostic policy."
-- **UPDATE notification (§3 step 3).** "For committed UPDATEs, emit `RVOOS_NOTIFY_VACUUM` from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs." A notification flushed before the commit record survives a crash that rolls the UPDATE back; the [CBRD-27237 deep dive](../../../my-cubrid-docs/cbrd-27237/CBRD-27237-fix-options-deep-dive_dcbf09e_claude.md) calls this the window before commit.
+- **UPDATE notification (§3 step 3).** "For committed UPDATEs, emit `RVOOS_NOTIFY_VACUUM` from a commit hook before `logtb_complete_mvcc`, listing `(head OOS OID, expected identity stamp)` pairs." A notification flushed before the commit record survives a crash that rolls the UPDATE back; the [CBRD-27237 deep dive](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-27237/CBRD-27237-fix-options-deep-dive_dcbf09e_claude.md) calls this the window before commit.
 - **LSA reclaim gate.** "For each reclaim call, sample the horizon as the minimum head LSA of active regular transactions and active system tdes, clamped to the pre-scan append LSA. Deallocate an empty page only when its page LSA is older. Otherwise classify it **deferred**: abort by a still-active deleter may need to undo chunk deletes into that page. It becomes reclaimable when the writer finishes." The growth-gate sweep kept deferred pages armed while growth proceeded.
 - **Chunk layout.** The 24-byte header held `total_data_length`, `chunk_index`, the next-chunk OID, and the chunk's own `identity_stamp`. "Insert redo/delete undo restore the stored stamp from the logged image."
 
@@ -141,5 +141,5 @@ Candidates B–E and the discussion notes below were carried without exact sourc
 
 ## Original source material
 
-The original context was compiled from the human-readable `~/gh/cubrid-oos-vault/`:
+The original context was compiled from the earlier supporting notes (`cubrid-oos-vault`, historical):
 `content/CLAUDE.md` (core knowledge), `AGENTS.md` (architecture), `content/oos-todo.md` (bugs/ideas), `content/OOS-Presentation.md` (rationale/comparisons), and `content/OOS-Test-Scenarios.md` (tests). These are supporting references, not dependencies or substitutes for the canonical specification.

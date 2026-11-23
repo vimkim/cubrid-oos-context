@@ -1,5 +1,10 @@
 ---
+id: OOS-ADR-0003
 status: accepted
+last_updated: 2026-07-13
+jira_issues:
+  - CBRD-26847
+  - CBRD-26948
 ---
 
 # OOS record expansion is opt-in for raw-byte consumers

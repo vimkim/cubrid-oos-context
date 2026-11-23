@@ -1,12 +1,17 @@
 ---
+id: OOS-ADR-0009
 status: accepted
+last_updated: 2026-11-06
+jira_issues:
+  - CBRD-27925
+  - CBRD-26786
 ---
 
 # Reclaim empty OOS pages before growth, not while the file is idle
 
 > **Amends** [OOS-CONTEXT.md](../../OOS-CONTEXT.md) §4, the empty-page reclaim invariant (CBRD-26786, accepted 2026-08-28). It removes the requirement that an emptied page is returned to the file manager while its OOS file receives no new allocation. The rule that a file reserves no new sector while a safely reclaimable empty page exists is unchanged.
 
-Accepted by the OOS owner on 2026-11-05 for CBRD-27925, after Work818, an independent review of the reclaim scope that remains once ADR-0008 (reclaim after finality, on branch `docs/adr-0008-reclaim-after-finality` until its accepted text merges) is implemented, found that the two sentences of the invariant contradict each other in practice.
+Accepted by the OOS owner on 2026-11-05 for CBRD-27925, after an independent review of the reclaim scope that remains once ADR-0008 (reclaim after finality) is implemented found that the two sentences of the invariant contradict each other in practice.
 
 ## Context
 
@@ -35,5 +40,5 @@ Decision 4 first required that the peak page count of a repeated workload not gr
 
 ## Evidence
 
-- Independent review: `my-cubrid-docs` `cbrd-27925/adr0008-claude-review.md`, section F5.
-- Original failures: `my-cubrid-docs` `cbrd-26659/reclaim-compact-diagnosis.md` (engine `e3589ae42`, testcase `01df2600a`).
+- Independent review: [adr0008-claude-review.md](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-27925/adr0008-claude-review.md), section F5.
+- Original failures: [reclaim-compact-diagnosis.md](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-26659/reclaim-compact-diagnosis.md) (engine `e3589ae42`, testcase `01df2600a`).

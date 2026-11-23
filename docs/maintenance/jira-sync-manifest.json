@@ -1,0 +1,178 @@
+{
+  "schema": "cubrid-oos-context/jira-sync-manifest/1",
+  "hub_issue": {
+    "key": "CBRD-28315",
+    "url": "https://jira.cubrid.org/browse/CBRD-28315",
+    "parent_epic": "CBRD-26357",
+    "relates_epic": "CBRD-26978",
+    "source_repo": "https://github.com/vimkim/cubrid-oos-context",
+    "source_branch": "main",
+    "synced_commit": "139ec89",
+    "last_synced_at": "2026-11-23T18:20:09+09:00"
+  },
+  "hub_description": {
+    "source_files": [
+      "OOS-CONTEXT.md",
+      "CONTEXT.md"
+    ],
+    "source_sha256": {
+      "OOS-CONTEXT.md": "725aab43b04aa5bc85df375f40ef8c31c5ec73cb9c2c5352c0978ebb19bc351b",
+      "CONTEXT.md": "c2a9582984f0b7fb9c030396def958aef5c4123dff336dcb0b9eb916383cdcd7"
+    },
+    "ko_file": "docs/maintenance/jira-ko/hub-description.md",
+    "ko_sha256": "91c68a7c02e58694f5e022fe7b919c5bf64fe616dcee5c54777a26e56cbe0d60"
+  },
+  "adrs": [
+    {
+      "id": "OOS-ADR-0001",
+      "source_file": "docs/adr/0001-oos-page-enumeration-non-numerable.md",
+      "status": "accepted",
+      "last_updated": "2026-06-18",
+      "source_sha256": "25c7750867731b97d0068e699914837b2fc8352788b9b2252bdb81cae3b6f415",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0001.md",
+      "ko_sha256": "2689a8dff8d408e6c806733b9046a9c0d1f4b7736b7be13d78cdd3b9dbb9ea61",
+      "comment_id": "4778950",
+      "jira_issues": [
+        "CBRD-26831",
+        "CBRD-26786"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0002",
+      "source_file": "docs/adr/0002-oos-lob-locator-demotion.md",
+      "status": "accepted",
+      "last_updated": "2026-07-13",
+      "source_sha256": "b4720b5127758b4cee3dc8590bc435d9042be2888cb06bf0a4887b5976cba879",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0002.md",
+      "ko_sha256": "089f7344afe86415de1ed3e5714607d7a6bdae6a729f77632cdaa23b07ebafdc",
+      "comment_id": "4778951",
+      "jira_issues": [
+        "CBRD-26814"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0003",
+      "source_file": "docs/adr/0003-oos-expansion-is-opt-in.md",
+      "status": "accepted",
+      "last_updated": "2026-07-13",
+      "source_sha256": "3ba0949c29752c01d37b5dd2be0e82dfba0812d491bf6d8bfc8c0cf59ca3612c",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0003.md",
+      "ko_sha256": "5b8b8576e100605045040530330ff66668b485e705a98285f1af356683bb793a",
+      "comment_id": "4778952",
+      "jira_issues": [
+        "CBRD-26847",
+        "CBRD-26948"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0004",
+      "source_file": "docs/adr/0004-durable-oos-supplemental-images.md",
+      "status": "accepted",
+      "last_updated": "2026-09-22",
+      "source_sha256": "c3cb857b9238804341516d021385e3119de1ce72004b30ca54a0b63103e5aacb",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0004.md",
+      "ko_sha256": "9cfb03ff671630f44a8812273515aa03f43e186cfb989af40e3ef03db0fe8e16",
+      "comment_id": "4778953",
+      "jira_issues": [
+        "CBRD-26939"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0005",
+      "source_file": "docs/adr/0005-defer-oos-history-from-the-11-5-merge.md",
+      "status": "accepted",
+      "last_updated": "2026-10-27",
+      "source_sha256": "e872b220ca93867462347023c2ea2cc7ed6f03b831956f9d580e2d571061b6d5",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0005.md",
+      "ko_sha256": "b90f86975178f75ac6dd52f13b5b8729c0b54f8a3569388175efeb0a52be754e",
+      "comment_id": "4778954",
+      "jira_issues": [
+        "CBRD-26939",
+        "CBRD-26357"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0006",
+      "source_file": "docs/adr/0006-reject-pre-stamp-databases-at-boot.md",
+      "status": "accepted",
+      "last_updated": "2026-11-05",
+      "source_sha256": "e3922a610405e0344318f4639468bc8ab8062e5df8af58d52d1af63c9dd89455",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0006.md",
+      "ko_sha256": "3c07ea2160184edaf46c931948e538e65583ac9c590414a3641e03dd96087015",
+      "comment_id": "4778955",
+      "jira_issues": [
+        "CBRD-26357"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0007",
+      "source_file": "docs/adr/0007-run-deferred-cdc-regressions-in-qa-regression-only.md",
+      "status": "accepted",
+      "last_updated": "2026-10-27",
+      "source_sha256": "1a58df63a03d7b0b99ad485eb1469774d4e46d422d4faf340dce491703e2800c",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0007.md",
+      "ko_sha256": "4765c6fbbfa3852b97f213d937e07ab469042e60502965f2c12c4292303833bb",
+      "comment_id": "4778956",
+      "jira_issues": [
+        "CBRD-26939"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0008",
+      "source_file": "docs/adr/0008-reclaim-oos-chains-after-the-delete-is-final.md",
+      "status": "accepted",
+      "last_updated": "2026-11-12",
+      "source_sha256": "99d3630d3ea6b838273e1358421049b440ae47dcecb543955d156ba0ff1e1325",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0008.md",
+      "ko_sha256": "3d4d8f0f031b7d4743da24707d1be5cf6c5a42421a5acbe2f24aca41c5c9b3b1",
+      "comment_id": "4778957",
+      "jira_issues": [
+        "CBRD-27781",
+        "CBRD-27237"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0009",
+      "source_file": "docs/adr/0009-reclaim-empty-pages-before-growth-not-while-idle.md",
+      "status": "accepted",
+      "last_updated": "2026-11-06",
+      "source_sha256": "3ac4d996ac434776ce5821a521ac08e538debb5de408bde6c3f12c63c42736a0",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0009.md",
+      "ko_sha256": "5e976329dfe69a21e94138bd1cb31592d16b7b0b333166a8d58ab9c66a03b5ab",
+      "comment_id": "4778958",
+      "jira_issues": [
+        "CBRD-27925",
+        "CBRD-26786"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0010",
+      "source_file": "docs/adr/0010-arm-growth-reclaim-with-emptied-pages.md",
+      "status": "accepted",
+      "last_updated": "2026-11-09",
+      "source_sha256": "9d356390a55a4e05f0b0361730d2c9959903da1e17d6b29e38b884ff73d1fd16",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0010.md",
+      "ko_sha256": "51363f76b6d37497ce4089acbc6638cad8bb5c3de1610c686f80111da321dc0c",
+      "comment_id": "4778959",
+      "jira_issues": [
+        "CBRD-27925",
+        "CBRD-27872"
+      ]
+    },
+    {
+      "id": "OOS-ADR-0011",
+      "source_file": "docs/adr/0011-reuse-emptied-pages-in-place.md",
+      "status": "proposed",
+      "last_updated": "2026-11-11",
+      "source_sha256": "0a90e470b6a3c84196405c9cb6b68d1b9e77b47c02790ad4b334fb8b08d57d4b",
+      "ko_file": "docs/maintenance/jira-ko/OOS-ADR-0011.md",
+      "ko_sha256": "e6a6ae8ee6519e5dec9ffcecf8d869c1009bdade8d8c91e138effdd3248c92fa",
+      "comment_id": "4778960",
+      "jira_issues": [
+        "CBRD-28281",
+        "CBRD-27925",
+        "CBRD-27872"
+      ]
+    }
+  ]
+}

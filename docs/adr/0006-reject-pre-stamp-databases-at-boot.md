@@ -1,5 +1,9 @@
 ---
+id: OOS-ADR-0006
 status: accepted
+last_updated: 2026-11-05
+jira_issues:
+  - CBRD-26357
 ---
 
 # Reject pre-stamp databases at boot with a volume-header storage-format stamp
@@ -35,4 +39,4 @@ Accepted with the user on 2026-10-27 for PR #7990 (OOS epic CBRD-26357), answeri
 
 ## Evidence
 
-Engine `feature/oos-merge` commits `1e8701b4f` (stamp, check, error, enum order, ctest `test_oos_storage_format_guard`) and `d8ed97f77` (emergency-patch coverage, `diagdb` prints `storage_format`, static asserts), verified on 2026-10-27 at PR head `dcbf09e4f7fd02ff9c8fc6493ec8887fc2919d67`. [Design investigation](../../../../temp/pr7990-review-5662427700/t2-boot-rejection-design.md) at head `4408135c0` (investigation, not the decision record). Dated verification results are in the [implementation observation](../reference/implementation-observations.md#cbrd-26357-storage-format-boot-check).
+Engine `feature/oos-merge` commits `1e8701b4f` (stamp, check, error, enum order, ctest `test_oos_storage_format_guard`) and `d8ed97f77` (emergency-patch coverage, `diagdb` prints `storage_format`, static asserts), verified on 2026-10-27 at PR head `dcbf09e4f7fd02ff9c8fc6493ec8887fc2919d67`. Design investigation (`t2-boot-rejection-design.md`) at head `4408135c0` (investigation, not the decision record). Dated verification results are in the [implementation observation](../reference/implementation-observations.md#cbrd-26357-storage-format-boot-check).

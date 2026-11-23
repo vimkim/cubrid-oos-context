@@ -1,13 +1,14 @@
 # CUBRID OOS (Out-of-row Overflow Storage) — Normative Specification
 
 > Normative specification and single source of truth for required CUBRID OOS behavior.
-> Last updated: 2026-11-19 (document modification only). Implementation observations carry their own evidence dates and revisions.
+> Official company JIRA mirror (one-way sync from this SoT): [CBRD-28315](https://jira.cubrid.org/browse/CBRD-28315) (Sub-task of [CBRD-26357](https://jira.cubrid.org/browse/CBRD-26357)).
+> Last updated: 2026-11-23 (document modification only: added official JIRA mirror pointer and OOS-ADR naming convention; normative technical requirements unchanged since 2026-11-19). Implementation observations carry their own evidence dates and revisions.
 
 ## Authority and reading paths
 
 Requirements in this file are **normative** unless explicitly marked proposed, historical, or outside the stated release scope. An accepted design is a requirement, even when an observed implementation has a conformance gap. Source code establishes behavior at that revision; JIRA establishes ticket workflow state. Neither silently changes accepted requirements.
 
-Keep all required behavior in this canonical file and read it completely when the [OOS context loader](/home/vimkim/.agents/skills/cubrid-oos-context/SKILL.md) selects a specification-dependent task. The loader owns file override, complete-read, fingerprint, and reuse policy. Follow these additional pointers only when their condition applies:
+Keep all required behavior in this canonical file and read it completely when the `cubrid-oos-context` skill loader selects a specification-dependent task. The loader owns file override, complete-read, fingerprint, and reuse policy. Follow these additional pointers only when their condition applies:
 
 | Read when | Reference |
 |---|---|
@@ -325,3 +326,4 @@ The accepted OOS design uses separate value chains per attribute and has no OOS-
 - Use **reclaim intent** for the postponed decision and **OOS reclaimer** for the redo-only deletion; neither is a rollback or an undoable cleanup sysop.
 - Add a space between inline code and Korean text: `` `oos_read` 는 ``.
 - Label implementation, proposal, and history; accepted design does not establish implementation or merge completion. Cite dated observations for progress claims.
+- Use `OOS-ADR-NNNN` (e.g., `OOS-ADR-0001` through `OOS-ADR-0011`) when referencing ADRs in JIRA, PRs, and reviews; keep `accepted` and `proposed` status and each ADR's `last_updated` date explicit, and sync changes to [CBRD-28315](https://jira.cubrid.org/browse/CBRD-28315) per [JIRA sync workflow](docs/maintenance/jira-sync.md).

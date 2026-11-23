@@ -1,5 +1,9 @@
 ---
+id: OOS-ADR-0004
 status: accepted
+last_updated: 2026-09-22
+jira_issues:
+  - CBRD-26939
 ---
 
 # Preserve OOS historical values in supplemental images
@@ -36,4 +40,4 @@ Keep `bug_bts_4633` as a separate diagnosis within the overall PR #6864 success 
 
 This ADR records the direction accepted on 2026-09-08, not a completed implementation or final specification. ADR-0005 later deferred the whole change and reopened its compatibility/activation design. Encoding, publication ordering, compatibility enforcement details, and verification therefore remain future design work.
 
-Evidence: [diagnosis and experiments](../../../my-cubrid-docs/cbrd-26939/2940b1c_codex/diagnosis-and-design.md), engine `2940b1cfbc3c2d4d0fac3f9244a960350debd380`. The reduced DELETE workload fails with vacuum enabled, passes with vacuum disabled, and fails after vacuum is restored.
+Evidence: [diagnosis and experiments](https://github.com/vimkim/my-cubrid-docs/blob/main/cbrd-26939/2940b1c_codex/diagnosis-and-design.md), engine `2940b1cfbc3c2d4d0fac3f9244a960350debd380`. The reduced DELETE workload fails with vacuum enabled, passes with vacuum disabled, and fails after vacuum is restored.

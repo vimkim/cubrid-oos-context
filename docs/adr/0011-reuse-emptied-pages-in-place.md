@@ -1,12 +1,18 @@
 ---
+id: OOS-ADR-0011
 status: proposed
+last_updated: 2026-11-11
+jira_issues:
+  - CBRD-28281
+  - CBRD-27925
+  - CBRD-27872
 ---
 
 # Reuse emptied OOS pages in place instead of deallocating them
 
 > **Amends** [ADR-0009](0009-reclaim-empty-pages-before-growth-not-while-idle.md) decision 3 (keep the vacuum fast path) and [ADR-0010](0010-arm-growth-reclaim-with-emptied-pages.md) decision 3 (check set members with the two-phase reclaim). On acceptance it also amends [OOS-CONTEXT.md](../../OOS-CONTEXT.md) §4: the growth gate and the vacuum fast path bullets. The invariant is unchanged: an OOS file reserves a new sector only when no reusable empty page exists ([ADR-0009](0009-reclaim-empty-pages-before-growth-not-while-idle.md) decision 2).
 
-Proposed on 2026-11-11 for CBRD-27925 (Work878). This is step 2 of the plan in ADR-0010 "Follow-up: in-place reuse". The owner chose reuse-first on 2026-11-06 and sequenced it after ADR-0010 on 2026-11-09.
+Proposed on 2026-11-11 for CBRD-27925 and CBRD-28281. This is step 2 of the plan in ADR-0010 "Follow-up: in-place reuse". The owner chose reuse-first on 2026-11-06 and sequenced it after ADR-0010 on 2026-11-09.
 
 ## Context
 
@@ -18,7 +24,7 @@ With ADR-0010, a growth that finds an empty page in the emptied-page set returns
 
 Every OOS INSERT takes the same header WRITE latch to look up its page, so a deallocation on the INSERT path makes other INSERTs of the file wait. A deallocation also frees no space: a permanent file returns sectors to the disk only in `file_destroy` (ADR-0009 Context), so the only user of a deallocated OOS page is the next allocation of the same file.
 
-The growth arena (Work829, candidate C) modeled reuse-first: the growth writes into the empty page under the WRITE latch it validated the page with, and the page is never deallocated. It kept the rule and the size bound in all four settings (with and without crashes, with and without writes during a growth), with no system operation per reuse. Three variants failed: no validation under the latch (writes into a deallocated page), late removal from the set (the file grows to the cap), and no reinitialization of a page whose dead slots leave no room (the rule fails).
+The growth arena (candidate C) modeled reuse-first: the growth writes into the empty page under the WRITE latch it validated the page with, and the page is never deallocated. It kept the rule and the size bound in all four settings (with and without crashes, with and without writes during a growth), with no system operation per reuse. Three variants failed: no validation under the latch (writes into a deallocated page), late removal from the set (the file grows to the cap), and no reinitialization of a page whose dead slots leave no room (the rule fails).
 
 ## Decision
 
@@ -53,7 +59,7 @@ The growth arena (Work829, candidate C) modeled reuse-first: the growth writes i
 ## Evidence
 
 - Implementation: `CUBRID/cubrid` branch `CBRD-27925-emptied-set`, `5d7eda23c` (remove the fast path), `b8a7e5d74` (reuse in place), `f8cdfca747` (take set members one at a time) and `b24fe8741e` (decision 6), on PR #8434 head `94ed2ea46`.
-- Model: `my-cubrid-docs` `cbrd-27925/growth-arena/c-reuse-first/REPORT.md` and `OosReuseFirst.tla` (Work829).
-- Measurement: `my-cubrid-docs` branch `docs/CBRD-27872-reuse-measure`, `cbrd-27872/growth-cost-reuse-measurement.md`.
+- Model: `vimkim/my-cubrid-docs` `cbrd-27925/growth-arena/c-reuse-first/REPORT.md` and `OosReuseFirst.tla`.
+- Measurement: `vimkim/my-cubrid-docs` branch `docs/CBRD-27872-reuse-measure`, `cbrd-27872/growth-cost-reuse-measurement.md`.
 
 The model is a small finite design model. It does not show that code conforms or how much time is saved.

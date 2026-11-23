@@ -1,5 +1,10 @@
 ---
+id: OOS-ADR-0005
 status: accepted
+last_updated: 2026-10-27
+jira_issues:
+  - CBRD-26939
+  - CBRD-26357
 ---
 
 # Defer OOS historical images from the 11.5 merge

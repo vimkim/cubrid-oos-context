@@ -1,5 +1,10 @@
 ---
+id: OOS-ADR-0001
 status: accepted
+last_updated: 2026-06-18
+jira_issues:
+  - CBRD-26831
+  - CBRD-26786
 ---
 
 # OOS pages use a non-numerable file enumerated by a sector-bitmap scan

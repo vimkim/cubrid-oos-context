@@ -1,6 +1,6 @@
 # OOS test recipes
 
-Last updated: 2026-10-27 (document modification).
+Last updated: 2026-11-23 (document modification: aligned §9.6 with the 2026-11-09 bigone rejection rule).
 
 Read when preparing SQL test data or choosing regression coverage. These are **non-normative recipes**, moved from repository revision `0eab7df`; they are not new test-run results or proof of feature availability. Derive expected behavior from [OOS-CONTEXT.md](../../OOS-CONTEXT.md), and check the relevant [implementation observation](implementation-observations.md) before interpreting a capability gap. Use the native SQL/shell/medium or configured unit-test workflow appropriate to the task.
 
@@ -104,7 +104,7 @@ CREATE TABLE oos_test (
 - **9.3 NULL values**: NULL in OOS-eligible column
 - **9.4 Empty values**: Zero-length VARBIT in OOS-eligible column
 - **9.5 Many OOS-backed attributes**: 10+ attributes demoted in a single heap record
-- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1388 at PR #7990 head `dcbf09e`; the number shifts with `develop` merges), row not stored. A non-OOS bigone, or an OOS-backed heap record left between the OOS inline target and ~16KB because candidates were exhausted, still succeeds
+- **9.6 OOS + bigone rejection (CBRD-26937)**: Record with an OOS-backed attribute + a large fixed `BIT(n)` that stays > ~16KB after demotion → INSERT/UPDATE rejected with `ER_HEAP_OOS_OVERPASS_MAXOBJ_SIZE` (-1388 at PR #7990 head `dcbf09e`; the number shifts with `develop` merges), row not stored. A non-OOS non-system record that still exceeds `heap_Maxslotted_reclength` (e.g., large fixed-length values or many ≤24B variable values) is also rejected under the 2026-11-09 canonical §1 rule; a system/root-class record, or an OOS-backed heap record left between the OOS inline target and ~16KB because candidates were exhausted, still succeeds
 
 #### 10. Stress Tests (2 tests)
 
